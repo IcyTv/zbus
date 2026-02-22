@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 5.10.0 - 2026-02-22
+
+### Added
+- ✨ Implement Basic for more types. #1681
+
+### Changed
+- 🚚 Rename an internal macro.
+
+### Dependencies
+- ⬆️ Update libfuzzer-sys to v0.4.12 (#1709).
+
+### Fixed
+- 🐛 Encode bool as single byte in GVariant.
+
+### Testing
+- ✅ Add test case for bool encoding.
+
 ## 5.9.2 - 2026-01-18
 
 ### Other

@@ -67,6 +67,7 @@ commit_parsers = [
     { message = "^✨", group = "Added" },
     { message = "^🎉", group = "Added" },
     { message = "^👷", group = "Added" },
+    { message = "^🚸", group = "Added" },
 
     # Bug fixes.
     { message = "^🐛", group = "Fixed" },
