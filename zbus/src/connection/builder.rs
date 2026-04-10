@@ -1,3 +1,4 @@
+use async_broadcast::Receiver as ActiveReceiver;
 #[cfg(not(feature = "tokio"))]
 use async_io::Async;
 use enumflags2::BitFlags;
@@ -23,10 +24,13 @@ use vsock::VsockStream;
 
 use zvariant::ObjectPath;
 
+#[cfg(feature = "bus-impl")]
+use crate::MessageStream;
 use crate::{
     Connection, Error, Executor, Guid, OwnedGuid, Result,
     address::{self, Address},
     fdo::RequestNameFlags,
+    message::Message,
     names::{InterfaceName, WellKnownName},
     object_server::{ArcInterface, Interface},
 };
@@ -432,11 +436,87 @@ impl<'a> Builder<'a> {
     /// Until server-side bus connection is supported, attempting to build such a connection will
     /// result in a [`Error::Unsupported`] error.
     pub async fn build(self) -> Result<Connection> {
+        let (conn, _) = self.build_inner(false).await?;
+        Ok(conn)
+    }
+
+    /// Build the connection and return a [`MessageStream`] to receive messages from it.
+    ///
+    /// This is equivalent to [`Self::build`] followed by `MessageStream::from(&conn)`, except
+    /// that the stream is set up **before** the socket-reader task is started. No messages can
+    /// therefore be lost in the window between `build()` returning and `MessageStream::from`
+    /// being called. Use this when the peer may pipeline traffic right after authentication —
+    /// e.g. a bus implementation reading a `Hello` method call from a just-connected client.
+    ///
+    /// To get the [`Connection`] out of the returned stream, use `Connection::from(&stream)` —
+    /// this is cheap (an `Arc` clone).
+    ///
+    /// This method is only available when the `bus-impl` feature is enabled.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// # use futures_util::StreamExt;
+    /// # use zbus::{
+    /// #     Connection, Guid, block_on,
+    /// #     connection::{Builder, socket::Channel},
+    /// #     message::Message,
+    /// # };
+    /// #
+    /// # block_on(async {
+    /// let guid = Guid::generate();
+    /// let (c1, c2) = Channel::pair();
+    ///
+    /// // Bus client sends a method call right away (simulates pipelining after auth).
+    /// let client = Builder::authenticated_socket(c1, guid.clone())
+    ///     .unwrap()
+    ///     .build()
+    ///     .await
+    ///     .unwrap();
+    /// let hello = Message::method_call("/org/freedesktop/DBus", "Hello")
+    ///     .unwrap()
+    ///     .destination("org.freedesktop.DBus")
+    ///     .unwrap()
+    ///     .build(&())
+    ///     .unwrap();
+    /// client.send(&hello).await.unwrap();
+    ///
+    /// // Server builds *after* the client has already sent.
+    /// let mut stream = Builder::authenticated_socket(c2, guid)
+    ///     .unwrap()
+    ///     .p2p()
+    ///     .build_message_stream()
+    ///     .await
+    ///     .unwrap();
+    ///
+    /// let msg = stream.next().await.unwrap().unwrap();
+    /// assert_eq!(msg.header().member().unwrap().as_str(), "Hello");
+    ///
+    /// let _conn: Connection = (&stream).into();
+    /// # });
+    /// ```
+    #[cfg(feature = "bus-impl")]
+    pub async fn build_message_stream(self) -> Result<MessageStream> {
+        let (conn, msg_receiver) = self.build_inner(true).await?;
+        let msg_receiver = msg_receiver.expect("build_inner(true) always returns Some");
+
+        Ok(MessageStream::for_subscription_channel(
+            msg_receiver,
+            None,
+            &conn,
+        ))
+    }
+
+    async fn build_inner(
+        self,
+        activate_msg_stream: bool,
+    ) -> Result<(Connection, Option<ActiveReceiver<Result<Message>>>)> {
         let executor = Executor::new();
         #[cfg(not(feature = "tokio"))]
         let internal_executor = self.internal_executor;
         // Box the future as it's large and can cause stack overflow.
-        let conn = Box::pin(executor.run(self.build_(executor.clone()))).await?;
+        let conn =
+            Box::pin(executor.run(self.build_(executor.clone(), activate_msg_stream))).await?;
 
         #[cfg(not(feature = "tokio"))]
         start_internal_executor(&executor, internal_executor)?;
@@ -444,7 +524,11 @@ impl<'a> Builder<'a> {
         Ok(conn)
     }
 
-    async fn build_(mut self, executor: Executor<'static>) -> Result<Connection> {
+    async fn build_(
+        mut self,
+        executor: Executor<'static>,
+        activate_msg_stream: bool,
+    ) -> Result<(Connection, Option<ActiveReceiver<Result<Message>>>)> {
         #[cfg(feature = "p2p")]
         let is_bus_conn = !self.p2p;
         #[cfg(not(feature = "p2p"))]
@@ -481,6 +565,10 @@ impl<'a> Builder<'a> {
             listener.await;
         }
 
+        // Set up a message receiver before the socket-reader task is spawned so that the
+        // caller cannot miss early messages due to a race with the reader task.
+        let msg_receiver = activate_msg_stream.then(|| conn.inner.msg_receiver.activate_cloned());
+
         // Start the socket reader task.
         conn.init_socket_reader(
             socket_read,
@@ -494,7 +582,7 @@ impl<'a> Builder<'a> {
                 .await?;
         }
 
-        Ok(conn)
+        Ok((conn, msg_receiver))
     }
 
     fn new(target: Target) -> Self {

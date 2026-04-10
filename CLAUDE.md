@@ -111,9 +111,14 @@ zbus/src/
 
 - **MSRV**: 1.87.0
 - **Commit style**: Emoji prefix + package abbreviation (e.g., "🐛 zb: Fix connection timeout")
+- **Changelog**: `CHANGELOG.md` files are managed by [release-plz] — do **not** hand-edit
+  them. Write a good commit message (conventional-commits-ish) and release-plz will
+  generate the entry at release time.
 - **Testing**: Integration tests require D-Bus session bus
 - **Cross-platform**: Validate changes work on Linux, Windows, macOS
 - **Dependencies**: Check compatibility with async runtimes and optional features
+
+[release-plz]: https://release-plz.ieni.dev/
 
 ## Key Files for Understanding
 

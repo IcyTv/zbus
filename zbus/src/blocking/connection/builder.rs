@@ -264,4 +264,23 @@ impl<'a> Builder<'a> {
     pub fn build(self) -> Result<Connection> {
         block_on(self.0.build()).map(Into::into)
     }
+
+    /// Build the connection and return a [`MessageIterator`] to receive messages from it.
+    ///
+    /// This is the blocking counterpart of [`crate::connection::Builder::build_message_stream`].
+    /// The iterator is set up **before** the socket-reader task is started, so no messages can
+    /// be lost in the window between the connection being built and the iterator being created.
+    /// Use this when the peer may pipeline traffic right after authentication — e.g. a bus
+    /// implementation reading a `Hello` method call from a just-connected client.
+    ///
+    /// To get the [`Connection`] out of the returned iterator, use `Connection::from(&iter)`.
+    ///
+    /// This method is only available when the `bus-impl` feature is enabled.
+    ///
+    /// [`MessageIterator`]: crate::blocking::MessageIterator
+    #[cfg(feature = "bus-impl")]
+    pub fn build_message_iterator(self) -> Result<crate::blocking::MessageIterator> {
+        block_on(self.0.build_message_stream())
+            .map(|azync| crate::blocking::MessageIterator { azync: Some(azync) })
+    }
 }
