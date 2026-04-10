@@ -39,5 +39,16 @@ clap = { workspace = true, optional = true }
 [dev-dependencies]
 pretty_assertions.workspace = true
 
+[package.metadata.docs.rs]
+all-features = true
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-gnu",
+    "x86_64-apple-darwin",
+    "x86_64-unknown-freebsd",
+    "x86_64-unknown-netbsd",
+    "aarch64-linux-android",
+]
+
 [lints]
 workspace = true
