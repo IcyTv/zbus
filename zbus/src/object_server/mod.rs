@@ -17,9 +17,9 @@ use crate::{
 
 mod interface;
 pub(crate) use interface::ArcInterface;
-pub use interface::{
-    DispatchResult, DispatchResult2, Interface, InterfaceDeref, InterfaceDerefMut, InterfaceRef,
-};
+#[allow(deprecated)]
+pub use interface::DispatchResult;
+pub use interface::{DispatchResult2, Interface, InterfaceDeref, InterfaceDerefMut, InterfaceRef};
 
 mod signal_emitter;
 pub use signal_emitter::SignalEmitter;

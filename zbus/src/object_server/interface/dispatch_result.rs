@@ -7,6 +7,7 @@ use crate::{Connection, Result, fdo, message::Message};
 use tracing::trace;
 
 /// A helper type returned by [`Interface`](`crate::object_server::Interface`) callbacks.
+#[deprecated(since = "5.15.0", note = "Use `DispatchResult2` instead.")]
 pub enum DispatchResult<'a> {
     /// This interface does not support the given method.
     NotFound,
@@ -20,6 +21,7 @@ pub enum DispatchResult<'a> {
     Async(Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>),
 }
 
+#[allow(deprecated)]
 impl<'a> DispatchResult<'a> {
     /// Helper for creating the Async variant.
     pub fn new_async<F, T, E>(conn: &'a Connection, msg: &'a Message, f: F) -> Self
