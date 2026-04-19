@@ -309,31 +309,25 @@ impl ObjectServer {
         let read_lock = iface.read().await;
         trace!("acquired read lock on interface `{}`", iface_name);
         match read_lock.call(self, connection, msg, member.as_ref()) {
-            DispatchResult::NotFound => {
+            DispatchResult2::NotFound => {
                 return Err(fdo::Error::UnknownMethod(format!(
                     "Unknown method '{member}'"
                 )));
             }
-            DispatchResult::Async(f) => {
-                return f.await.map_err(|e| match e {
-                    Error::FDO(e) => *e,
-                    e => fdo::Error::Failed(format!("{e}")),
-                });
+            DispatchResult2::Async(f) => {
+                return f.await;
             }
-            DispatchResult::RequiresMut => {}
+            DispatchResult2::RequiresMut => {}
         }
         drop(read_lock);
         trace!("acquiring write lock on interface `{}`", iface_name);
         let mut write_lock = iface.write().await;
         trace!("acquired write lock on interface `{}`", iface_name);
         match write_lock.call_mut(self, connection, msg, member.as_ref()) {
-            DispatchResult::NotFound => {}
-            DispatchResult::RequiresMut => {}
-            DispatchResult::Async(f) => {
-                return f.await.map_err(|e| match e {
-                    Error::FDO(e) => *e,
-                    e => fdo::Error::Failed(format!("{e}")),
-                });
+            DispatchResult2::NotFound => {}
+            DispatchResult2::RequiresMut => {}
+            DispatchResult2::Async(f) => {
+                return f.await;
             }
         }
         drop(write_lock);
