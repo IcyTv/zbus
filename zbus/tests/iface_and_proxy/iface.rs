@@ -485,6 +485,47 @@ impl MyIface {
         Ok(())
     }
 
+    /// A property with a fallible setter that preserves the D-Bus error name on failure.
+    #[instrument]
+    #[zbus(property)]
+    fn fallible_prop(&self) -> u32 {
+        debug!("`FallibleProp` getter called.");
+        0
+    }
+
+    #[instrument]
+    #[zbus(property)]
+    async fn set_fallible_prop(&self, val: u32) -> zbus::fdo::Result<()> {
+        debug!("`FallibleProp` setter called.");
+        if val > 60 {
+            return Err(zbus::fdo::Error::InvalidArgs(format!(
+                "Provided value is {val}; values above 60 not accepted"
+            )));
+        }
+        Ok(())
+    }
+
+    /// A property whose setter returns `zbus::Result<()>`, to keep the broader return-type
+    /// variant covered.
+    #[instrument]
+    #[zbus(property)]
+    fn fallible_zbus_prop(&self) -> u32 {
+        debug!("`FallibleZbusProp` getter called.");
+        0
+    }
+
+    #[instrument]
+    #[zbus(property)]
+    async fn set_fallible_zbus_prop(&self, val: u32) -> zbus::Result<()> {
+        debug!("`FallibleZbusProp` setter called.");
+        if val > 60 {
+            return Err(zbus::Error::Failure(format!(
+                "Provided value is {val}; values above 60 not accepted"
+            )));
+        }
+        Ok(())
+    }
+
     async fn never_return(&self) {
         debug!("`NeverReturn` called.");
 

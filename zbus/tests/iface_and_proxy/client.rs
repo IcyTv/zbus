@@ -3,7 +3,7 @@ use futures_util::{StreamExt, TryStreamExt};
 use std::convert::TryInto;
 use tracing::{debug, instrument};
 use zbus::{
-    Connection, Error, Message, MessageStream,
+    Connection, DBusError, Error, Message, MessageStream,
     fdo::{ObjectManagerProxy, PropertiesProxy},
     message,
     proxy::CacheProperties,
@@ -177,6 +177,26 @@ pub async fn my_iface_test(conn: Connection, event: Event) -> zbus::Result<u32> 
     assert_eq!(proxy.r#let().await?, 0);
     proxy.set_let(1).await?;
     assert_eq!(proxy.r#let().await?, 1);
+
+    // Test that fallible property setters preserve the D-Bus error name (regression test for
+    // #992).
+    proxy.set_fallible_prop(60).await?;
+    let err = proxy
+        .set_fallible_prop(61)
+        .await
+        .expect_err("Setting value above 60 should fail");
+    let Error::FDO(fdo_err) = err else {
+        panic!("Expected Error::FDO, got {err:?}");
+    };
+    assert!(matches!(*fdo_err, zbus::fdo::Error::InvalidArgs(_)));
+    assert_eq!(fdo_err.name(), "org.freedesktop.DBus.Error.InvalidArgs");
+
+    // Setter returning `zbus::Result<()>` keeps working; verify the error round-trips.
+    proxy.set_fallible_zbus_prop(60).await?;
+    proxy
+        .set_fallible_zbus_prop(61)
+        .await
+        .expect_err("Setting value above 60 should fail");
 
     assert_eq!(
         proxy.raw_identifier_parameter("param").await?,

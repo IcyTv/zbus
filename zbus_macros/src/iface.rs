@@ -511,11 +511,15 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                         quote!(self.#ident(#args_names)#method_await)
                     } else if is_async {
                         quote!(
-                            ::std::result::Result::Ok(self.#ident(#args_names).await)
+                            ::std::result::Result::<_, #zbus::fdo::Error>::Ok(
+                                self.#ident(#args_names).await,
+                            )
                         )
                     } else {
                         quote!(
-                            ::std::result::Result::Ok(self.#ident(#args_names))
+                            ::std::result::Result::<_, #zbus::fdo::Error>::Ok(
+                                self.#ident(#args_names),
+                            )
                         )
                     };
 
@@ -591,7 +595,6 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                                     .#prop_changed_method_name(&__zbus__signal_emitter)
                                     .await
                                     .map(|_| set_result)
-                                    .map_err(Into::into)
                             })
                         }
                         PropertyEmitsChangedSignal::Invalidates => {
@@ -600,11 +603,10 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                                     .#prop_invalidate_method_name(&__zbus__signal_emitter)
                                     .await
                                     .map(|_| set_result)
-                                    .map_err(Into::into)
                             })
                         }
                         PropertyEmitsChangedSignal::False | PropertyEmitsChangedSignal::Const => {
-                            quote!({ Ok(()) })
+                            quote!({ ::std::result::Result::<_, #zbus::Error>::Ok(()) })
                         }
                     };
                     let do_set = quote!({
@@ -614,8 +616,13 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                             ::std::result::Result::Ok(val) => {
                                 let #value_param_name = val;
                                 match #set_call {
-                                    ::std::result::Result::Ok(set_result) => #prop_changed_method
-                                    e => e,
+                                    ::std::result::Result::Ok(set_result) => {
+                                        (#prop_changed_method)
+                                            .map_err(|e| #zbus::fdo::Error::from(e))
+                                    }
+                                    ::std::result::Result::Err(e) => {
+                                        ::std::result::Result::Err(#zbus::fdo::Error::from(e))
+                                    }
                                 }
                             }
                             ::std::result::Result::Err(e) => {
@@ -637,14 +644,14 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
 
                         let q = quote!(
                             #(#cfg_attrs)*
-                            #member_name => #zbus::object_server::DispatchResult::RequiresMut,
+                            #member_name => #zbus::object_server::DispatchResult2::RequiresMut,
                         );
                         set_dispatch.extend(q);
                     } else {
                         let q = quote!(
                             #(#cfg_attrs)*
                             #member_name => {
-                                #zbus::object_server::DispatchResult::Async(::std::boxed::Box::pin(async move {
+                                #zbus::object_server::DispatchResult2::Async(::std::boxed::Box::pin(async move {
                                     #do_set
                                 }))
                             }
@@ -795,8 +802,11 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                                 #reply
                             }
                         };
-                        #zbus::object_server::DispatchResult::Async(::std::boxed::Box::pin(async move {
-                            future.await
+                        #zbus::object_server::DispatchResult2::Async(::std::boxed::Box::pin(async move {
+                            future.await.map_err(|e| match e {
+                                #zbus::Error::FDO(e) => *e,
+                                e => #zbus::fdo::Error::Failed(::std::format!("{e}")),
+                            })
                         }))
                     },
                 };
@@ -804,7 +814,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 if is_mut {
                     call_dispatch.extend(quote! {
                         #(#cfg_attrs)*
-                        #member_name => #zbus::object_server::DispatchResult::RequiresMut,
+                        #member_name => #zbus::object_server::DispatchResult2::RequiresMut,
                     });
                     call_mut_dispatch.extend(m);
                 } else {
@@ -924,10 +934,10 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 __zbus__connection: &'call #zbus::Connection,
                 __zbus__header: Option<&'call #zbus::message::Header<'_>>,
                 __zbus__signal_emitter: &'call #zbus::object_server::SignalEmitter<'_>,
-            ) -> #zbus::object_server::DispatchResult<'call> {
+            ) -> #zbus::object_server::DispatchResult2<'call> {
                 match __zbus__property_name {
                     #set_dispatch
-                    _ => #zbus::object_server::DispatchResult::NotFound,
+                    _ => #zbus::object_server::DispatchResult2::NotFound,
                 }
             }
 
@@ -952,10 +962,10 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 __zbus__connection: &'call #zbus::Connection,
                 __zbus__message: &'call #zbus::message::Message,
                 name: #zbus::names::MemberName<'call>,
-            ) -> #zbus::object_server::DispatchResult<'call> {
+            ) -> #zbus::object_server::DispatchResult2<'call> {
                 match name.as_str() {
                     #call_dispatch
-                    _ => #zbus::object_server::DispatchResult::NotFound,
+                    _ => #zbus::object_server::DispatchResult2::NotFound,
                 }
             }
 
@@ -965,10 +975,10 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 __zbus__connection: &'call #zbus::Connection,
                 __zbus__message: &'call #zbus::message::Message,
                 name: #zbus::names::MemberName<'call>,
-            ) -> #zbus::object_server::DispatchResult<'call> {
+            ) -> #zbus::object_server::DispatchResult2<'call> {
                 match name.as_str() {
                     #call_mut_dispatch
-                    _ => #zbus::object_server::DispatchResult::NotFound,
+                    _ => #zbus::object_server::DispatchResult2::NotFound,
                 }
             }
 
