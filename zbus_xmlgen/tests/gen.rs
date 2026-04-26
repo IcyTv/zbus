@@ -47,3 +47,8 @@ fn sample_object0() -> Result<(), Box<dyn Error>> {
 fn struct_return() -> Result<(), Box<dyn Error>> {
     gen_diff!("struct_return.xml", "struct_return.rs")
 }
+
+#[test]
+fn property_setters() -> Result<(), Box<dyn Error>> {
+    gen_diff!("property_setters.xml", "property_setters.rs")
+}
