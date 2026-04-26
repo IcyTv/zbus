@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<node>
+  <interface name="com.example.PropertySetters">
+    <property name="Variant" type="v" access="readwrite"/>
+    <property name="StructPair" type="(ii)" access="readwrite"/>
+    <property name="StructSingle" type="(i)" access="readwrite"/>
+    <property name="ArrayOfVariant" type="av" access="readwrite"/>
+    <property name="ArrayOfStruct" type="a(ii)" access="readwrite"/>
+    <property name="DictStrToVariant" type="a{sv}" access="readwrite"/>
+    <property name="StructWithArrayOfVariant" type="(av)" access="readwrite"/>
+  </interface>
+</node>

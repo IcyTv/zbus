@@ -219,7 +219,7 @@ impl GenTrait<'_> {
 
             if p.access().write() {
                 writeln!(w, "{fn_attribute}")?;
-                let input = to_rust_type(p.ty(), true, true);
+                let input = to_property_setter_type(p.ty());
                 writeln!(
                     w,
                     "    fn set_{name}(&self, value: {input}) -> zbus::Result<()>;",
@@ -418,6 +418,38 @@ fn to_rust_type(ty: &Signature, input: bool, as_ref: bool) -> String {
     }
 
     signature_to_rust_type(ty, input, as_ref)
+}
+
+// Like `to_rust_type` for an input parameter, but tailored to property setters.
+//
+// `Proxy::set_property` requires the value to satisfy `T: Into<Value<'t>>`. For most
+// types, the `&T` form already implements this (via `From<&T> for Value`). For `Variant`
+// and `Structure`, the `&T` form does not, so the owned form is emitted instead, also
+// when these appear nested inside an `Array` or `Dict`.
+fn to_property_setter_type(ty: &Signature) -> String {
+    fn inner(signature: &Signature) -> String {
+        match signature {
+            Signature::Variant => "zbus::zvariant::Value<'_>".into(),
+            Signature::Structure(fields) => {
+                let fields = fields.iter().map(inner).collect::<Vec<_>>();
+                if fields.len() > 1 {
+                    format!("({})", fields.join(", "))
+                } else {
+                    format!("({},)", fields[0])
+                }
+            }
+            Signature::Array(child) => format!("&[{}]", inner(child)),
+            Signature::Dict { key, value } => {
+                format!(
+                    "std::collections::HashMap<{}, {}>",
+                    inner(key),
+                    inner(value),
+                )
+            }
+            _ => to_rust_type(signature, true, true),
+        }
+    }
+    inner(ty)
 }
 
 static KWORDS: &[&str] = &[
