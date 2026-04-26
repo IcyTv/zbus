@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 5.15.0 - 2026-04-26
+
+### Added
+- ✨ Introduce DispatchResult2 with fdo::Result for dispatch futures.
+- ✨ Add Builder::build_message_stream.
+
+### Changed
+- ♻️ Port Interface and dispatch sites to DispatchResult2.
+
+### Deprecated
+- 🗑️ Deprecate DispatchResult in favour of DispatchResult2.
+
+### Documentation
+- 📝 Configure docs.rs to build for all supported targets.
+
+### Testing
+- ✅ Cover D-Bus error name preservation on property setters.
+- ✅ Explicitly choose host endianess in a test.
+
 ## 5.14.0 - 2026-02-22
 
 ### Added

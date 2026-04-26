@@ -31,9 +31,9 @@ syn = { workspace = true, features = ["extra-traits", "fold", "full"] }
 quote.workspace = true
 proc-macro-crate.workspace = true
 
-zvariant = { path = "../zvariant", version = "5.10.0" }
-zbus_names = { path = "../zbus_names", version = "4.3.1" }
-zvariant_utils = { path = "../zvariant_utils", version = "3.3.0" }
+zvariant = { path = "../zvariant", version = "5.10.1" }
+zbus_names = { path = "../zbus_names", version = "4.3.2" }
+zvariant_utils = { path = "../zvariant_utils", version = "3.3.1" }
 
 [dev-dependencies]
 zbus.workspace = true
