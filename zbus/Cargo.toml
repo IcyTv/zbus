@@ -129,7 +129,24 @@ tempfile.workspace = true
 criterion.workspace = true
 
 [package.metadata.docs.rs]
-all-features = true
+# we can't use:
+# all-features = true
+# because some features (such as vsock) are target-specific
+features = [
+    "async-io",
+    "blocking-api",
+    "uuid",
+    "url",
+    "time",
+    "chrono",
+    "heapless",
+    "option-as-array",
+    "camino",
+    "bus-impl",
+    "p2p",
+    "tokio",
+    "serde_bytes",
+]
 targets = [
     "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-gnu",
