@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use endi::NATIVE_ENDIAN;
 use zvariant::{
-    DeserializeDict, Dict, SerializeDict, Str, Type, Value, as_value::optional,
+    DeserializeDict, Dict, OwnedObjectPath, SerializeDict, Str, Type, Value, as_value::optional,
     serialized::Context, to_bytes,
 };
 
@@ -241,4 +241,27 @@ fn dict_value() {
     let data = to_bytes(ctxt, &TestEmpty::default()).unwrap();
 
     assert_eq!(data.bytes(), &[0, 0, 0, 0, 0, 0, 0, 0]);
+}
+
+#[test]
+fn struct_with_object_path_keys() {
+    let ctxt = Context::new_dbus(NATIVE_ENDIAN, 0);
+
+    #[derive(serde::Deserialize, Type, PartialEq, Debug, Default)]
+    #[zvariant(signature = "a{ou}")]
+    #[serde(default)]
+    struct Mapped {
+        #[serde(rename = "/foo")]
+        foo: u32,
+        #[serde(rename = "/bar")]
+        bar: u32,
+    }
+
+    let mut wire: HashMap<OwnedObjectPath, u32> = HashMap::new();
+    wire.insert(OwnedObjectPath::try_from("/foo").unwrap(), 1);
+    wire.insert(OwnedObjectPath::try_from("/bar").unwrap(), 2);
+
+    let encoded = to_bytes(ctxt, &wire).unwrap();
+    let decoded: Mapped = encoded.deserialize().unwrap().0;
+    assert_eq!(decoded, Mapped { foo: 1, bar: 2 });
 }
