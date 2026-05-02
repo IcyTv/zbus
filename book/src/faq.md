@@ -107,6 +107,48 @@ pub struct Dictionary {
 }
 ```
 
+### Nested dictionaries
+
+D-Bus interfaces frequently return dicts whose values are themselves dicts — for example
+`a{sa{sv}}` (the body of `org.freedesktop.DBus.ObjectManager.GetManagedObjects` and similar APIs).
+You can mirror that shape by nesting one `*Dict` struct inside another. The outer struct's
+`signature` advertises the nested form; its fields name the outer keys and have an inner `*Dict`
+struct as their type:
+
+```rust,noplayground
+use zbus::zvariant::{DeserializeDict, SerializeDict, Type};
+
+
+#[derive(DeserializeDict, SerializeDict, Type, PartialEq, Debug, Default, Clone)]
+#[zvariant(signature = "a{sv}", rename_all = "PascalCase")]
+struct Adapter {
+    address: Option<String>,
+    name: Option<String>,
+    powered: bool,
+}
+
+#[derive(DeserializeDict, SerializeDict, Type, PartialEq, Debug, Default, Clone)]
+#[zvariant(signature = "a{sv}", rename_all = "PascalCase")]
+struct Media {
+    supported_features: Vec<String>,
+    #[zvariant(rename = "SupportedUUIDs")]
+    supported_uuids: Vec<String>,
+}
+
+#[derive(DeserializeDict, SerializeDict, Type, PartialEq, Debug, Default)]
+#[zvariant(signature = "a{sa{sv}}")]
+struct Interfaces {
+    #[zvariant(rename = "org.bluez.Adapter1")]
+    adapter: Option<Adapter>,
+    #[zvariant(rename = "org.bluez.Media1")]
+    media: Media,
+}
+```
+
+The same pattern works for `a{oa{sv}}` (object-path keys) and composes to deeper nesting — the
+outer derive defers each field to its own `Serialize`/`Deserialize` impl rather than wrapping it
+as a variant.
+
 ## Why do async tokio API calls from interface methods not work?
 
 Many of the tokio (and tokio-based) APIs assume the tokio runtime to be driving the async machinery
