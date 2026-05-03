@@ -35,7 +35,7 @@
             const path_to_root = "";
             const default_light_theme = "rust";
             const default_dark_theme = "navy";
-            window.path_to_searchindex_js = "searchindex-7e58e975.js";
+            window.path_to_searchindex_js = "searchindex-1a8ad000.js";
         </script>
         <!-- Start loading toc.js asap -->
         <script src="toc-a78ba3cc.js"></script>
@@ -182,7 +182,11 @@
                     <main>
                         <h1 id="faq"><a class="header" href="#faq">FAQ</a></h1>
 <ul>
-<li><a href="#how-to-use-a-struct-as-a-dictionary">How to use a struct as a dictionary?</a></li>
+<li><a href="#how-to-use-a-struct-as-a-dictionary">How to use a struct as a dictionary?</a>
+<ul>
+<li><a href="#nested-dictionaries">Nested dictionaries</a></li>
+</ul>
+</li>
 <li><a href="#why-do-async-tokio-api-calls-from-interface-methods-not-work">Why do async tokio API calls from interface methods not work?</a></li>
 <li><a href="#im-experiencing-hangs-what-could-be-wrong">I’m experiencing hangs, what could be wrong?</a>
 <ul>
@@ -289,6 +293,42 @@ pub struct Dictionary {
     #[serde(with = "optional", skip_serializing_if = "Option::is_none")]
     optional_field2: Option&lt;String&gt;,
 }</code></pre>
+<h3 id="nested-dictionaries"><a class="header" href="#nested-dictionaries">Nested dictionaries</a></h3>
+<p>D-Bus interfaces frequently return dicts whose values are themselves dicts — for example
+<code>a{sa{sv}}</code> (the body of <code>org.freedesktop.DBus.ObjectManager.GetManagedObjects</code> and similar APIs).
+You can mirror that shape by nesting one <code>*Dict</code> struct inside another. The outer struct’s
+<code>signature</code> advertises the nested form; its fields name the outer keys and have an inner <code>*Dict</code>
+struct as their type:</p>
+<pre><code class="language-rust noplayground">use zbus::zvariant::{DeserializeDict, SerializeDict, Type};
+
+
+#[derive(DeserializeDict, SerializeDict, Type, PartialEq, Debug, Default, Clone)]
+#[zvariant(signature = "a{sv}", rename_all = "PascalCase")]
+struct Adapter {
+    address: Option&lt;String&gt;,
+    name: Option&lt;String&gt;,
+    powered: bool,
+}
+
+#[derive(DeserializeDict, SerializeDict, Type, PartialEq, Debug, Default, Clone)]
+#[zvariant(signature = "a{sv}", rename_all = "PascalCase")]
+struct Media {
+    supported_features: Vec&lt;String&gt;,
+    #[zvariant(rename = "SupportedUUIDs")]
+    supported_uuids: Vec&lt;String&gt;,
+}
+
+#[derive(DeserializeDict, SerializeDict, Type, PartialEq, Debug, Default)]
+#[zvariant(signature = "a{sa{sv}}")]
+struct Interfaces {
+    #[zvariant(rename = "org.bluez.Adapter1")]
+    adapter: Option&lt;Adapter&gt;,
+    #[zvariant(rename = "org.bluez.Media1")]
+    media: Media,
+}</code></pre>
+<p>The same pattern works for <code>a{oa{sv}}</code> (object-path keys) and composes to deeper nesting — the
+outer derive defers each field to its own <code>Serialize</code>/<code>Deserialize</code> impl rather than wrapping it
+as a variant.</p>
 <h2 id="why-do-async-tokio-api-calls-from-interface-methods-not-work"><a class="header" href="#why-do-async-tokio-api-calls-from-interface-methods-not-work">Why do async tokio API calls from interface methods not work?</a></h2>
 <p>Many of the tokio (and tokio-based) APIs assume the tokio runtime to be driving the async machinery
 and since by default, zbus runs the <code>ObjectServer</code> in its own internal runtime thread, it’s not
