@@ -182,7 +182,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Fuzz zvariant
         run: |
-          cargo --locked install cargo-fuzz
+          cargo install cargo-fuzz
           cargo --locked fuzz run --fuzz-dir zvariant/fuzz dbus -- -max_total_time=30 -max_len=100M
           cargo --locked fuzz run --fuzz-dir zvariant/fuzz --features gvariant gvariant -- -max_total_time=30 -max_len=100M
 
