@@ -88,6 +88,8 @@ tokio = { workspace = true, optional = true, features = [
     "sync",
     "tracing",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 vsock = { workspace = true, optional = true }
 tokio-vsock = { workspace = true, optional = true }
 
