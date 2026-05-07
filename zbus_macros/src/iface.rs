@@ -886,14 +886,17 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
         impl #generics #zbus::object_server::Interface for #self_ty
         #where_clause
         {
+            #[doc = "Return the name of the interface."]
             fn name() -> #zbus::names::InterfaceName<'static> {
                 #zbus::names::InterfaceName::from_static_str_unchecked(#iface_name)
             }
 
+            #[doc = "Whether each method call will be handled from a different spawned task."]
             fn spawn_tasks_for_methods(&self) -> bool {
                 #with_spawn
             }
 
+            #[doc = "Get a property value. Returns `None` if the property doesn't exist."]
             async fn get(
                 &self,
                 __zbus__property_name: &str,
@@ -908,6 +911,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 }
             }
 
+            #[doc = "Return all the properties."]
             async fn get_all(
                 &self,
                 __zbus__object_server: &#zbus::ObjectServer,
@@ -926,6 +930,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 Ok(props)
             }
 
+            #[doc = "Set a property value (`&self`)."]
             fn set<'call>(
                 &'call self,
                 __zbus__property_name: &'call str,
@@ -941,6 +946,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 }
             }
 
+            #[doc = "Set a property value (`&mut self`). Invoked when `set` returns `RequiresMut`."]
             async fn set_mut(
                 &mut self,
                 __zbus__property_name: &str,
@@ -956,6 +962,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 }
             }
 
+            #[doc = "Call a method (`&self`)."]
             fn call<'call>(
                 &'call self,
                 __zbus__object_server: &'call #zbus::ObjectServer,
@@ -969,6 +976,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 }
             }
 
+            #[doc = "Call a method (`&mut self`). Invoked when `call` returns `RequiresMut`."]
             fn call_mut<'call>(
                 &'call mut self,
                 __zbus__object_server: &'call #zbus::ObjectServer,
@@ -982,6 +990,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 }
             }
 
+            #[doc = "Write introspection XML to the writer, with the given indentation level."]
             fn introspect_to_writer(&self, writer: &mut dyn ::std::fmt::Write, level: usize) {
                 ::std::writeln!(
                     writer,
