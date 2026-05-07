@@ -124,6 +124,9 @@ enum StrEnum {
     Variant1,
     Variant2,
     Variant3,
+    // Catch-all that preserves the raw value for any variant we don't know about.
+    #[serde(untagged)]
+    Other(String),
 }
 
 assert_eq!(StrEnum::SIGNATURE, "s");
