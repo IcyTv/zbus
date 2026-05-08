@@ -13,7 +13,7 @@ use std::{
     sync::{Arc, OnceLock, RwLock, RwLockReadGuard},
     task::{Context, Poll},
 };
-use tracing::{Instrument, debug, info_span, instrument, trace};
+use tracing::{Instrument, debug, info_span, instrument, trace, warn};
 
 use zbus_names::{BusName, InterfaceName, MemberName, UniqueName};
 use zvariant::{ObjectPath, OwnedValue, Str, Value};
@@ -298,6 +298,10 @@ impl PropertiesCache {
                         (prop_changes, interface, uncached_properties)
                     }
                     Err(e) => {
+                        warn!(
+                            "Failed to populate properties cache via GetAll: {e}. \
+                             Property change streams will not produce values."
+                        );
                         ready.notify(usize::MAX);
                         *caching_result = CachingResult::Cached { result: Err(e) };
 
