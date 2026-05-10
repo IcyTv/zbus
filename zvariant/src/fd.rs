@@ -136,6 +136,7 @@ impl<'de> Deserialize<'de> for Fd<'de> {
         D: Deserializer<'de>,
     {
         let raw = i32::deserialize(deserializer)?;
+        debug_assert!(raw >= 0);
         // SAFETY: The `'de` lifetimes will ensure the borrow won't outlive the raw FD.
         let fd = unsafe { BorrowedFd::borrow_raw(raw) };
 
