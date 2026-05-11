@@ -830,6 +830,7 @@ where
         let v = match &self.signature {
             #[cfg(unix)]
             Signature::Fd => {
+                debug_assert!(value >= 0);
                 // SAFETY: The `'de` lifetimes will ensure the borrow won't outlive the raw FD.
                 let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(value) };
                 Fd::Borrowed(fd).into()
