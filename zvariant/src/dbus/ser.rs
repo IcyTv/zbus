@@ -473,7 +473,7 @@ where
                 "a struct".to_string(),
             ));
         };
-        let struct_field = fields.iter().nth(1).and_then(|f| {
+        let struct_field = fields.get(1).and_then(|f| {
             if matches!(f, Signature::Structure(_)) {
                 Some(f)
             } else {
@@ -511,7 +511,7 @@ where
                 }
             }
             Signature::Structure(fields) => {
-                let signature = fields.iter().nth(self.field_idx).ok_or_else(|| {
+                let signature = fields.get(self.field_idx).ok_or_else(|| {
                     Error::SignatureMismatch(signature.clone(), "a struct".to_string())
                 })?;
                 self.field_idx += 1;
