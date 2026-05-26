@@ -2,6 +2,9 @@
 "http://www.freedesktop.org/standards/dbus/1.0/introspect.dtd">
 <node>
   <interface name="test.StructReturn">
+    <method name="ReturnsBareStruct">
+      <arg name="result" type="tt" direction="out" />
+    </method>
     <method name="ReturnsStruct">
       <arg name="result" type="(ss)" direction="out" />
     </method>
