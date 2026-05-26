@@ -23,7 +23,7 @@ camino = ["dep:camino"]
 
 [dependencies]
 zvariant_derive = { path = "../zvariant_derive", version = "5.11.0" }
-zvariant_utils = { path = "../zvariant_utils", version = "3.3.1" }
+zvariant_utils = { path = "../zvariant_utils", version = "3.4.0" }
 endi.workspace = true
 serde.workspace = true
 winnow.workspace = true
