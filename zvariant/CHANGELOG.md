@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 5.12.0 - 2026-05-27
+
+### Dependencies
+- ⬆️ Bump zvariant_utils requirement to 3.4.
+
+### Documentation
+- 📝 Document D-Bus FD encoding on `Fd`.
+- 📝 Show catch-all enum variant in docs.
+
+### Other
+- 🦺 Add 2 debug asserts.
+
+### Performance
+- ⚡️ Use Fields::get(i) for O(1) field signature lookup.
+
 ## 5.11.0 - 2026-05-03
 
 ### Added
