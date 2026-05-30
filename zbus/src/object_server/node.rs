@@ -96,8 +96,8 @@ impl Node {
         self.interfaces.get(&interface_name).cloned()
     }
 
-    pub(super) fn remove_interface(&mut self, interface_name: InterfaceName<'static>) -> bool {
-        self.interfaces.remove(&interface_name).is_some()
+    pub(super) fn remove_interface(&mut self, interface_name: &InterfaceName<'static>) -> bool {
+        self.interfaces.remove(interface_name).is_some()
     }
 
     pub(super) fn is_empty(&self) -> bool {
