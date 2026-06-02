@@ -294,6 +294,7 @@ impl Signature {
         use std::cmp::max;
 
         match self {
+            Signature::Bool => 1,
             Signature::Unit
             | Signature::U8
             | Signature::I16
@@ -301,7 +302,6 @@ impl Signature {
             | Signature::I32
             | Signature::U32
             | Signature::F64
-            | Signature::Bool
             | Signature::I64
             | Signature::U64
             | Signature::Signature => self.alignment_dbus(),
