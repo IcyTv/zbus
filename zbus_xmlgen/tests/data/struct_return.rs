@@ -1,5 +1,8 @@
 #[proxy(interface = "test.StructReturn", assume_defaults = true)]
 pub trait StructReturn {
+    /// ReturnsBareStruct method
+    fn returns_bare_struct(&self) -> zbus::Result<((u64, u64),)>;
+
     /// ReturnsNestedStruct method
     fn returns_nested_struct(&self) -> zbus::Result<(((String, String), i32),)>;
 
