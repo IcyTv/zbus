@@ -190,16 +190,33 @@ impl ObjectServer {
         P: TryInto<ObjectPath<'p>>,
         P::Error: Into<Error>,
     {
+        self.remove_named(path, I::name()).await
+    }
+
+    /// Unregister a D-Bus [`Interface`] at a given path, using its name.
+    ///
+    /// If there are no more interfaces left at that path, destroys the object as well.
+    /// Returns whether the object was destroyed.
+    pub async fn remove_named<'p, P>(
+        &self,
+        path: P,
+        interface_name: InterfaceName<'static>,
+    ) -> Result<bool>
+    where
+        P: TryInto<ObjectPath<'p>>,
+        P::Error: Into<Error>,
+    {
         let path = path.try_into().map_err(Into::into)?;
         let mut root = self.root.write().await;
         let (node, manager_path) = root.get_child_mut(&path, false);
         let node = node.ok_or(Error::InterfaceNotFound)?;
-        if !node.remove_interface(I::name()) {
+        if !node.remove_interface(&interface_name) {
             return Err(Error::InterfaceNotFound);
         }
         if let Some(manager_path) = manager_path {
             let ctxt = SignalEmitter::new(&self.connection(), manager_path.clone())?;
-            ObjectManager::interfaces_removed(&ctxt, path.clone(), (&[I::name()]).into()).await?;
+            ObjectManager::interfaces_removed(&ctxt, path.clone(), (&[interface_name]).into())
+                .await?;
         }
         if node.is_empty() {
             let mut path_parts = path.rsplit('/').filter(|i| !i.is_empty());
