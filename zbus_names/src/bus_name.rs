@@ -100,6 +100,30 @@ impl BusName<'_> {
     }
 }
 
+impl BusName<'static> {
+    /// Create a new static bus name, validating it at compile time in const contexts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` is neither a valid unique nor well-known D-Bus bus name.
+    pub const fn from_static_str_checked(name: &'static str) -> Self {
+        let bytes = name.as_bytes();
+        if !bytes.is_empty() && bytes[0] == b':' {
+            if !unique_name::validate_bytes_const(bytes) {
+                panic!("invalid D-Bus unique name");
+            }
+
+            Self::Unique(UniqueName::from_static_str_unchecked(name))
+        } else {
+            if !well_known_name::validate_bytes_const(bytes) {
+                panic!("invalid D-Bus well-known name");
+            }
+
+            Self::WellKnown(WellKnownName::from_static_str_unchecked(name))
+        }
+    }
+}
+
 impl Deref for BusName<'_> {
     type Target = str;
 

@@ -82,6 +82,19 @@ impl<'a> ObjectPath<'a> {
         Self(Str::from_static(name))
     }
 
+    /// Create a new static object path, validating it at compile time in const contexts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` is not a valid D-Bus object path.
+    pub const fn from_static_str_checked(name: &'static str) -> Self {
+        if !validate_const(name.as_bytes()) {
+            panic!("invalid D-Bus object path");
+        }
+
+        Self::from_static_str_unchecked(name)
+    }
+
     /// Same as `from_str_unchecked`, except it takes an owned `String`.
     ///
     /// Since the passed string is not checked for correctness, prefer using the
@@ -260,6 +273,37 @@ fn validate(path: &[u8]) -> Result<()> {
     let mut full_path = (b'/', separated(0.., name, b'/')).map(|_: (u8, ())| ());
 
     full_path.parse(path).map_err(|_| Error::InvalidObjectPath)
+}
+
+const fn validate_const(path: &[u8]) -> bool {
+    if path.is_empty() || path[0] != b'/' {
+        return false;
+    }
+
+    if path.len() == 1 {
+        return true;
+    }
+
+    let mut idx = 1;
+    let mut segment_len = 0;
+
+    while idx < path.len() {
+        let byte = path[idx];
+        if byte == b'/' {
+            if segment_len == 0 || idx + 1 == path.len() {
+                return false;
+            }
+            segment_len = 0;
+        } else {
+            if !byte.is_ascii_alphanumeric() && byte != b'_' {
+                return false;
+            }
+            segment_len += 1;
+        }
+        idx += 1;
+    }
+
+    segment_len > 0
 }
 
 /// Owned [`ObjectPath`](struct.ObjectPath.html)

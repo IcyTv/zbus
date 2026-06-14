@@ -120,6 +120,15 @@ pub fn match_attribute_without_value(meta: &Meta, attr: &str) -> Result<bool> {
     }
 }
 
+/// Compares `ident` and `attr` and returns the value expression in case they match.
+pub fn match_attribute_with_expr_value<'a>(meta: &'a Meta, attr: &str) -> Result<Option<&'a Expr>> {
+    if !meta.path().is_ident(attr) {
+        return Ok(None);
+    }
+
+    Ok(Some(&meta.require_name_value()?.value))
+}
+
 /// Returns an iterator over the contents of all [`MetaList`]s with the specified identifier in an
 /// array of [`Attribute`]s.
 pub fn iter_meta_lists(
@@ -282,6 +291,7 @@ macro_rules! def_attrs {
 
     (@attr_ty str) => {::std::option::Option<::std::string::String>};
     (@attr_ty bool) => {::std::option::Option<bool>};
+    (@attr_ty expr) => {::std::option::Option<::syn::Expr>};
     (@attr_ty [str]) => {::std::option::Option<::std::vec::Vec<::std::string::String>>};
     (@attr_ty none) => {bool};
     (@attr_ty {
@@ -341,6 +351,42 @@ macro_rules! def_attrs {
             ),
             ::std::stringify!($attr_name)
         )
+    };
+    (@match_attr expr crate_path, $meta:ident, $self:ident) => {
+        $crate::def_attrs!(
+            @match_attr_expr_with
+            crate_path,
+            $meta,
+            $self,
+            $crate::macros::match_attribute_with_expr_value($meta, "crate"),
+            "crate"
+        )
+    };
+    (@match_attr expr $attr_name:ident, $meta:ident, $self:ident) => {
+        $crate::def_attrs!(
+            @match_attr_expr_with
+            $attr_name,
+            $meta,
+            $self,
+            $crate::macros::match_attribute_with_expr_value(
+                $meta,
+                ::std::stringify!($attr_name),
+            ),
+            ::std::stringify!($attr_name)
+        )
+    };
+    (@match_attr_expr_with $attr_name:ident, $meta:ident, $self:ident, $matched:expr, $display_name:expr) => {
+        if let ::std::option::Option::Some(value) = $matched? {
+            if $self.$attr_name.is_some() {
+                return ::std::result::Result::Err(::syn::Error::new(
+                    $meta.span(),
+                    ::std::format!("duplicate `{}` attribute", $display_name)
+                ));
+            }
+
+            $self.$attr_name = ::std::option::Option::Some(value.clone());
+            return Ok(());
+        }
     };
     (@match_attr [str] $attr_name:ident, $meta:ident, $self:ident) => {
         if let Some(list) = $crate::macros::match_attribute_with_str_list_value(
@@ -409,6 +455,7 @@ macro_rules! def_attrs {
     };
     (@def_ty str) => {};
     (@def_ty bool) => {};
+    (@def_ty expr) => {};
     (@def_ty [str]) => {};
     (@def_ty none) => {};
     (

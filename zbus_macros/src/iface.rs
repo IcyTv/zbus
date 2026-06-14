@@ -3,7 +3,7 @@ use quote::{format_ident, quote};
 use std::collections::BTreeMap;
 use syn::{
     AngleBracketedGenericArguments, Attribute, Error, Expr, ExprLit, FnArg, GenericArgument, Ident,
-    ImplItem, ImplItemFn, ItemImpl,
+    ImplItem, ImplItemFn, ItemImpl, Lit,
     Lit::Str,
     Meta, MetaNameValue, PatType, PathArguments, ReturnType, Signature, Token, Type, TypePath,
     Visibility,
@@ -21,8 +21,8 @@ def_attrs! {
     crate zbus;
 
     pub ImplAttributes("impl block") {
-        interface str,
-        name str,
+        interface expr,
+        name expr,
         spawn bool,
         introspection_docs bool,
         crate_path str,
@@ -73,6 +73,24 @@ def_attrs! {
         signal_context none,
         signal_emitter none
     };
+}
+
+#[derive(Clone)]
+enum AttrExpr {
+    Literal(String),
+    Expr(Expr),
+}
+
+impl AttrExpr {
+    fn parse(expr: Expr) -> Self {
+        match expr {
+            Expr::Lit(ExprLit {
+                lit: Lit::Str(value),
+                ..
+            }) => Self::Literal(value.value()),
+            expr => Self::Expr(expr),
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -321,10 +339,13 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
     let iface_name = {
         match (impl_attrs.name, impl_attrs.interface) {
             // Ensure the interface name is valid.
-            (Some(name), None) | (None, Some(name)) => zbus_names::InterfaceName::try_from(name)
-                .map_err(|e| Error::new(input.span(), format!("{e}")))
-                .map(|i| i.to_string())?,
-            (None, None) => format!("org.freedesktop.{ty}"),
+            (Some(name), None) | (None, Some(name)) => match AttrExpr::parse(name) {
+                AttrExpr::Literal(name) => zbus_names::InterfaceName::try_from(name.as_str())
+                    .map_err(|e| Error::new(input.span(), format!("{e}")))
+                    .map(|i| AttrExpr::Literal(i.to_string()))?,
+                AttrExpr::Expr(expr) => AttrExpr::Expr(expr),
+            },
+            (None, None) => AttrExpr::Literal(format!("org.freedesktop.{ty}")),
             (Some(_), Some(_)) => {
                 return Err(syn::Error::new(
                     input.span(),
@@ -333,10 +354,23 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
             }
         }
     };
+    let interface_name = match &iface_name {
+        AttrExpr::Literal(iface_name) => {
+            quote! { #zbus::names::InterfaceName::from_static_str_unchecked(#iface_name) }
+        }
+        AttrExpr::Expr(expr) => quote! { #expr },
+    };
     let with_spawn = impl_attrs.spawn.unwrap_or(true);
-    let mut proxy = impl_attrs
-        .proxy
-        .map(|p| Proxy::new(ty, &iface_name, p, &zbus));
+    let mut proxy = match (&iface_name, impl_attrs.proxy) {
+        (AttrExpr::Literal(iface_name), Some(p)) => Some(Proxy::new(ty, iface_name, p, &zbus)),
+        (AttrExpr::Expr(_), Some(_)) => {
+            return Err(Error::new(
+                input.span(),
+                "generated proxies from expression-valued interface names are not supported",
+            ));
+        }
+        (_, None) => None,
+    };
     let introspect_docs = impl_attrs.introspection_docs.unwrap_or(true);
 
     // Store parsed information about each method
@@ -476,7 +510,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 });
                 method_clone.block = parse_quote!({
                     self.emit(
-                        #iface_name,
+                        #interface_name,
                         #member_name,
                         &(#args_names),
                     )
@@ -488,7 +522,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 method_clone.block = parse_quote!({
                     <#zbus::object_server::InterfaceRef<#self_ty>>::signal_emitter(self)
                         .emit(
-                            #iface_name,
+                            #interface_name,
                             #member_name,
                             &(#args_names),
                         )
@@ -748,7 +782,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                                 changed.insert(#member_name, value);
                                 #zbus::fdo::Properties::properties_changed(
                                     __zbus__signal_emitter,
-                                    #zbus::names::InterfaceName::from_static_str_unchecked(#iface_name),
+                                    #interface_name,
                                     changed,
                                     ::std::borrow::Cow::Borrowed(&[]),
                                 ).await
@@ -774,7 +808,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                             ) -> #zbus::Result<()> {
                                 #zbus::fdo::Properties::properties_changed(
                                     __zbus__signal_emitter,
-                                    #zbus::names::InterfaceName::from_static_str_unchecked(#iface_name),
+                                    #interface_name,
                                     ::std::collections::HashMap::new(),
                                     ::std::borrow::Cow::Borrowed(&[#member_name]),
                                 ).await
@@ -873,7 +907,29 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
     };
 
     let proxy = proxy.map(|proxy| proxy.r#gen()).transpose()?;
-    let introspect_format_str = format!("{}<interface name=\"{iface_name}\">", "{:indent$}");
+    let introspect_header = match &iface_name {
+        AttrExpr::Literal(iface_name) => {
+            let introspect_format_str =
+                format!("{}<interface name=\"{iface_name}\">", "{:indent$}");
+            quote! {
+                ::std::writeln!(
+                    writer,
+                    #introspect_format_str,
+                    "",
+                    indent = level
+                ).unwrap();
+            }
+        }
+        AttrExpr::Expr(_) => quote! {
+            ::std::writeln!(
+                writer,
+                r#"{:indent$}<interface name=\"{}\">"#,
+                "",
+                <Self as #zbus::object_server::Interface>::name().as_str(),
+                indent = level
+            ).unwrap();
+        },
+    };
 
     Ok(quote! {
         #input
@@ -888,7 +944,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
         {
             #[doc = "Return the name of the interface."]
             fn name() -> #zbus::names::InterfaceName<'static> {
-                #zbus::names::InterfaceName::from_static_str_unchecked(#iface_name)
+                #interface_name
             }
 
             #[doc = "Whether each method call will be handled from a different spawned task."]
@@ -992,12 +1048,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
 
             #[doc = "Write introspection XML to the writer, with the given indentation level."]
             fn introspect_to_writer(&self, writer: &mut dyn ::std::fmt::Write, level: usize) {
-                ::std::writeln!(
-                    writer,
-                    #introspect_format_str,
-                    "",
-                    indent = level
-                ).unwrap();
+                #introspect_header
                 {
                     use #zbus::zvariant::Type;
 

@@ -41,6 +41,21 @@ define_name_type_impls! {
     validate: validate,
 }
 
+impl WellKnownName<'static> {
+    /// Create a new static well-known bus name, validating it at compile time in const contexts.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `name` is not a valid D-Bus well-known bus name.
+    pub const fn from_static_str_checked(name: &'static str) -> Self {
+        if !validate_bytes_const(name.as_bytes()) {
+            panic!("invalid D-Bus well-known name");
+        }
+
+        Self::from_static_str_unchecked(name)
+    }
+}
+
 fn validate(name: &str) -> Result<()> {
     validate_bytes(name.as_bytes()).map_err(|_| {
         Error::InvalidName(
@@ -82,4 +97,41 @@ pub(crate) fn validate_bytes(bytes: &[u8]) -> std::result::Result<(), ()> {
 
             Ok(())
         })
+}
+
+pub(crate) const fn validate_bytes_const(bytes: &[u8]) -> bool {
+    if bytes.len() > 255 || bytes.len() < 3 {
+        return false;
+    }
+
+    let mut idx = 0;
+    let mut element_len = 0;
+    let mut has_dot = false;
+    let mut first = true;
+
+    while idx < bytes.len() {
+        let byte = bytes[idx];
+        if byte == b'.' {
+            if first || element_len == 0 || idx + 1 == bytes.len() {
+                return false;
+            }
+            has_dot = true;
+            element_len = 0;
+            first = true;
+        } else if first {
+            if !byte.is_ascii_alphabetic() && byte != b'_' && byte != b'-' {
+                return false;
+            }
+            element_len = 1;
+            first = false;
+        } else {
+            if !byte.is_ascii_alphanumeric() && byte != b'_' && byte != b'-' {
+                return false;
+            }
+            element_len += 1;
+        }
+        idx += 1;
+    }
+
+    has_dot && element_len > 0
 }

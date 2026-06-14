@@ -2,8 +2,8 @@ use crate::utils::{PropertyEmitsChangedSignal, parse_crate_path, pat_ident, type
 use proc_macro2::{Literal, Span, TokenStream};
 use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::{
-    Error, FnArg, Ident, ItemTrait, Meta, Path, ReturnType, Token, TraitItemFn, Visibility,
-    fold::Fold, parse_quote, parse_str, punctuated::Punctuated, spanned::Spanned,
+    Error, Expr, ExprLit, FnArg, Ident, ItemTrait, Lit, Meta, Path, ReturnType, Token, TraitItemFn,
+    Visibility, fold::Fold, parse_quote, parse_str, punctuated::Punctuated, spanned::Spanned,
 };
 use zvariant_utils::{case, def_attrs};
 
@@ -12,11 +12,11 @@ def_attrs! {
 
     // Keep this in sync with interface's proxy method attributes.
     pub TraitAttributes("trait") {
-        interface str,
-        name str,
+        interface expr,
+        name expr,
         assume_defaults bool,
-        default_path str,
-        default_service str,
+        default_path expr,
+        default_service expr,
         async_name str,
         blocking_name str,
         gen_async bool,
@@ -41,6 +41,24 @@ def_attrs! {
         no_autostart none,
         allow_interactive_auth none
     };
+}
+
+#[derive(Clone)]
+pub(crate) enum AttrExpr {
+    Literal(String),
+    Expr(Expr),
+}
+
+impl AttrExpr {
+    fn parse(expr: Expr) -> Self {
+        match expr {
+            Expr::Lit(ExprLit {
+                lit: Lit::Str(value),
+                ..
+            }) => Self::Literal(value.value()),
+            expr => Self::Expr(expr),
+        }
+    }
 }
 
 struct AsyncOpts {
@@ -69,7 +87,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
     let crate_path = parse_crate_path(attrs.crate_path.as_deref())?;
 
     let iface_name = match (attrs.interface, attrs.name) {
-        (Some(name), None) | (None, Some(name)) => Ok(Some(name)),
+        (Some(name), None) | (None, Some(name)) => Ok(Some(AttrExpr::parse(name))),
         (None, None) => Ok(None),
         (Some(_), Some(_)) => Err(syn::Error::new(
             input.span(),
@@ -107,10 +125,10 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
         });
         create_proxy(
             &input,
-            iface_name.as_deref(),
+            iface_name.as_ref(),
             attrs.assume_defaults,
-            attrs.default_path.as_deref(),
-            attrs.default_service.as_deref(),
+            attrs.default_path.clone().map(AttrExpr::parse).as_ref(),
+            attrs.default_service.clone().map(AttrExpr::parse).as_ref(),
             &proxy_name,
             true,
             // Signal args structs are shared between the two proxies so always generate it for
@@ -127,10 +145,10 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
             .unwrap_or_else(|| format!("{}Proxy", input.ident));
         create_proxy(
             &input,
-            iface_name.as_deref(),
+            iface_name.as_ref(),
             attrs.assume_defaults,
-            attrs.default_path.as_deref(),
-            attrs.default_service.as_deref(),
+            attrs.default_path.map(AttrExpr::parse).as_ref(),
+            attrs.default_service.map(AttrExpr::parse).as_ref(),
             &proxy_name,
             false,
             true,
@@ -150,10 +168,10 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, input: ItemTrait) -> Result<Tok
 #[allow(clippy::too_many_arguments)]
 pub fn create_proxy(
     input: &ItemTrait,
-    iface_name: Option<&str>,
+    iface_name: Option<&AttrExpr>,
     assume_defaults: Option<bool>,
-    default_path: Option<&str>,
-    default_service: Option<&str>,
+    default_path: Option<&AttrExpr>,
+    default_service: Option<&AttrExpr>,
     proxy_name: &str,
     blocking: bool,
     gen_sig_args: bool,
@@ -169,33 +187,51 @@ pub fn create_proxy(
     let proxy_name = Ident::new(proxy_name, Span::call_site());
     let ident = input.ident.to_string();
     let iface_name = iface_name
-        .map(|iface| {
+        .cloned()
+        .map(|iface| match iface {
             // Ensure the interface name is valid.
-            zbus_names::InterfaceName::try_from(iface)
+            AttrExpr::Literal(iface) => zbus_names::InterfaceName::try_from(iface.as_str())
                 .map_err(|e| Error::new(input.span(), format!("{e}")))
                 .map(|i| i.to_string())
+                .map(AttrExpr::Literal),
+            AttrExpr::Expr(expr) => Ok(AttrExpr::Expr(expr)),
         })
         .transpose()?
-        .unwrap_or(format!("org.freedesktop.{ident}"));
+        .unwrap_or_else(|| AttrExpr::Literal(format!("org.freedesktop.{ident}")));
     let assume_defaults = assume_defaults.unwrap_or(false);
     let default_path = default_path
-        .map(|path| {
+        .cloned()
+        .map(|path| match path {
             // Ensure the path is valid.
-            zvariant::ObjectPath::try_from(path)
+            AttrExpr::Literal(path) => zvariant::ObjectPath::try_from(path.as_str())
                 .map_err(|e| Error::new(input.span(), format!("{e}")))
                 .map(|p| p.to_string())
+                .map(AttrExpr::Literal),
+            AttrExpr::Expr(expr) => Ok(AttrExpr::Expr(expr)),
         })
         .transpose()?;
     let default_service = default_service
-        .map(|srv| {
+        .cloned()
+        .map(|srv| match srv {
             // Ensure the service is valid.
-            zbus_names::BusName::try_from(srv)
+            AttrExpr::Literal(srv) => zbus_names::BusName::try_from(srv.as_str())
                 .map_err(|e| Error::new(input.span(), format!("{e}")))
                 .map(|n| n.to_string())
+                .map(AttrExpr::Literal),
+            AttrExpr::Expr(expr) => Ok(AttrExpr::Expr(expr)),
         })
         .transpose()?;
     let (default_path, default_service) = if assume_defaults {
-        let path = default_path.or_else(|| Some(format!("/org/freedesktop/{ident}")));
+        if matches!(iface_name, AttrExpr::Expr(_))
+            && (default_path.is_none() || default_service.is_none())
+        {
+            return Err(Error::new(
+                input.span(),
+                "`assume_defaults` with expression-valued `interface` requires explicit `default_path` and `default_service`",
+            ));
+        }
+        let path =
+            default_path.or_else(|| Some(AttrExpr::Literal(format!("/org/freedesktop/{ident}"))));
         let svc = default_service.or_else(|| Some(iface_name.clone()));
         (path, svc)
     } else {
@@ -363,11 +399,14 @@ pub fn create_proxy(
         }
     };
     let default_path = match default_path {
-        Some(p) => quote! { &Some(#zbus::zvariant::ObjectPath::from_static_str_unchecked(#p)) },
+        Some(AttrExpr::Literal(p)) => {
+            quote! { &Some(#zbus::zvariant::ObjectPath::from_static_str_unchecked(#p)) }
+        }
+        Some(AttrExpr::Expr(expr)) => quote! { &Some(#expr) },
         None => quote! { &None },
     };
     let default_service = match default_service {
-        Some(d) => {
+        Some(AttrExpr::Literal(d)) => {
             if d.starts_with(':') || d == "org.freedesktop.DBus" {
                 quote! {
                     &Some(#zbus::names::BusName::Unique(
@@ -382,13 +421,20 @@ pub fn create_proxy(
                 }
             }
         }
+        Some(AttrExpr::Expr(expr)) => quote! { &Some(#expr) },
         None => quote! { &None },
+    };
+    let iface_name = match iface_name {
+        AttrExpr::Literal(iface_name) => {
+            quote! { #zbus::names::InterfaceName::from_static_str_unchecked(#iface_name) }
+        }
+        AttrExpr::Expr(expr) => quote! { #expr },
     };
 
     Ok(quote! {
         impl<'a> #zbus::proxy::Defaults for #proxy_name<'a> {
             const INTERFACE: &'static Option<#zbus::names::InterfaceName<'static>> =
-                &Some(#zbus::names::InterfaceName::from_static_str_unchecked(#iface_name));
+                &Some(#iface_name);
             const DESTINATION: &'static Option<#zbus::names::BusName<'static>> = #default_service;
             const PATH: &'static Option<#zbus::zvariant::ObjectPath<'static>> = #default_path;
         }
@@ -922,7 +968,7 @@ impl Fold for SetLifetimeS {
 #[allow(clippy::too_many_arguments)]
 fn gen_proxy_signal(
     proxy_name: &Ident,
-    iface_name: &str,
+    iface_name: &AttrExpr,
     signal_name: &str,
     rust_method_name: &str,
     method: &TraitItemFn,
@@ -1017,6 +1063,10 @@ fn gen_proxy_signal(
     let stream_name = format_ident!("{signal_name}{trait_name}");
     let signal_args = format_ident!("{signal_name}Args");
     let signal_name_ident = format_ident!("{signal_name}");
+    let interface_match = match iface_name {
+        AttrExpr::Literal(iface_name) => quote! { Some(#iface_name) },
+        AttrExpr::Expr(expr) => quote! { interface if interface == Some(#expr.as_str()) },
+    };
 
     let receive_gen_doc = format!(
         "Create a stream that receives `{signal_name}` signals.\n\
@@ -1083,7 +1133,7 @@ fn gen_proxy_signal(
                     let member = member.as_ref().map(|m| m.as_str());
 
                     match (message_type, interface, member) {
-                        (#zbus::message::Type::Signal, Some(#iface_name), Some(#signal_name)) => {
+                        (#zbus::message::Type::Signal, #interface_match, Some(#signal_name)) => {
                             Some(Self(msg.body()))
                         }
                         _ => None,

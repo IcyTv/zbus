@@ -18,6 +18,53 @@ mod param {
     }
 }
 
+mod const_attrs {
+    pub const INTERFACE: zbus::names::InterfaceName<'static> =
+        zbus::names::InterfaceName::from_static_str_checked(
+            "org.freedesktop.zbus_macros.ConstAttrs",
+        );
+    pub const SERVICE: zbus::names::BusName<'static> =
+        zbus::names::BusName::from_static_str_checked("org.freedesktop.zbus_macros.ConstAttrs");
+    pub const PATH: zbus::zvariant::ObjectPath<'static> =
+        zbus::zvariant::ObjectPath::from_static_str_checked(
+            "/org/freedesktop/zbus_macros/ConstAttrs",
+        );
+
+    #[zbus_macros::proxy(interface = INTERFACE, default_service = SERVICE, default_path = PATH)]
+    pub trait ConstAttrs {
+        fn ping(&self) -> zbus::Result<()>;
+    }
+
+    pub struct ConstAttrsInterface;
+
+    #[zbus_macros::interface(name = INTERFACE)]
+    impl ConstAttrsInterface {
+        fn ping(&self) {}
+    }
+}
+
+#[test]
+fn test_const_attrs() {
+    use zbus::{object_server::Interface as _, proxy::Defaults as _};
+
+    assert_eq!(
+        const_attrs::ConstAttrsProxy::INTERFACE.as_ref(),
+        Some(&const_attrs::INTERFACE),
+    );
+    assert_eq!(
+        const_attrs::ConstAttrsProxy::DESTINATION.as_ref(),
+        Some(&const_attrs::SERVICE),
+    );
+    assert_eq!(
+        const_attrs::ConstAttrsProxy::PATH.as_ref(),
+        Some(&const_attrs::PATH),
+    );
+    assert_eq!(
+        const_attrs::ConstAttrsInterface::name(),
+        const_attrs::INTERFACE,
+    );
+}
+
 mod test {
     use zbus::{
         fdo,
