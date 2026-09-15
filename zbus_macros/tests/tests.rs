@@ -33,6 +33,9 @@ mod const_attrs {
     #[zbus_macros::proxy(interface = INTERFACE, default_service = SERVICE, default_path = PATH)]
     pub trait ConstAttrs {
         fn ping(&self) -> zbus::Result<()>;
+
+        #[zbus(signal)]
+        fn pong(&self) -> zbus::Result<()>;
     }
 
     pub struct ConstAttrsInterface;

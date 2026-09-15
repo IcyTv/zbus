@@ -1063,9 +1063,12 @@ fn gen_proxy_signal(
     let stream_name = format_ident!("{signal_name}{trait_name}");
     let signal_args = format_ident!("{signal_name}Args");
     let signal_name_ident = format_ident!("{signal_name}");
-    let interface_match = match iface_name {
-        AttrExpr::Literal(iface_name) => quote! { Some(#iface_name) },
-        AttrExpr::Expr(expr) => quote! { interface if interface == Some(#expr.as_str()) },
+    let (interface_match, interface_guard) = match iface_name {
+        AttrExpr::Literal(iface_name) => (quote! { Some(#iface_name) }, quote! {}),
+        AttrExpr::Expr(expr) => (
+            quote! { interface },
+            quote! { if interface == Some(#expr.as_str()) },
+        ),
     };
 
     let receive_gen_doc = format!(
@@ -1133,7 +1136,7 @@ fn gen_proxy_signal(
                     let member = member.as_ref().map(|m| m.as_str());
 
                     match (message_type, interface, member) {
-                        (#zbus::message::Type::Signal, #interface_match, Some(#signal_name)) => {
+                        (#zbus::message::Type::Signal, #interface_match, Some(#signal_name)) #interface_guard => {
                             Some(Self(msg.body()))
                         }
                         _ => None,
