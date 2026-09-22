@@ -66,6 +66,17 @@ fn test_const_attrs() {
         const_attrs::ConstAttrsInterface::name(),
         const_attrs::INTERFACE,
     );
+
+    let mut xml = String::new();
+    const_attrs::ConstAttrsInterface.introspect_to_writer(&mut xml, 0);
+    assert_eq!(
+        xml,
+        r#"<interface name="org.freedesktop.zbus_macros.ConstAttrs">
+  <method name="Ping">
+  </method>
+</interface>
+"#
+    );
 }
 
 mod test {

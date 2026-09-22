@@ -931,7 +931,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
         AttrExpr::Expr(_) => quote! {
             ::std::writeln!(
                 writer,
-                r#"{:indent$}<interface name=\"{}\">"#,
+                r#"{:indent$}<interface name="{}">"#,
                 "",
                 <Self as #zbus::object_server::Interface>::name().as_str(),
                 indent = level
