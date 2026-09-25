@@ -41,7 +41,7 @@ def_attrs! {
     /// Attributes defined on structures.
     pub StructAttributes("struct") { signature str, rename_all str, deny_unknown_fields none, crate_path str };
     /// Attributes defined on fields.
-    pub FieldAttributes("field") { rename str };
+    pub FieldAttributes("field") { rename str, required none };
     /// Attributes defined on enumerations.
     pub EnumAttributes("enum") { signature str, rename_all str, crate_path str };
     /// Attributes defined on variants.

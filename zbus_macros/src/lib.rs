@@ -12,9 +12,7 @@
 )))]
 
 use proc_macro::TokenStream;
-use syn::{
-    DeriveInput, ItemImpl, ItemTrait, Meta, Token, parse_macro_input, punctuated::Punctuated,
-};
+use syn::{DeriveInput, Item, ItemTrait, Meta, Token, parse_macro_input, punctuated::Punctuated};
 
 mod error;
 mod iface;
@@ -384,6 +382,55 @@ pub fn proxy(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// See also [`ObjectServer`] documentation to learn how to export an interface over a `Connection`.
 ///
+/// The macro can also be applied to a trait to declare the client and server contract together.
+/// This generates a downstream-implementable behavior trait, a generic `TraitServer<T>` adapter,
+/// asynchronous and blocking proxies, `TraitProperties`, `TraitManagedProperties`, and a typed
+/// ObjectManager view. `TraitProperties` is the canonical, serializable snapshot containing every
+/// readable property. Fallible property getters become optional fields; infallible getters are
+/// required when decoding. Use `#[zbus(property, object_manager(skip))]` to leave an expensive or
+/// unsuitable property out of `TraitManagedProperties` without changing the full snapshot or the
+/// standard server wire response.
+///
+/// Trait-form declarations support `server_name`, `property_snapshot_name`, and
+/// `managed_property_snapshot_name`, and `object_manager_name` to override generated type names.
+/// Additional derives for the full snapshot can be requested with
+/// `property_snapshot(derive(Clone, PartialEq, Eq))`; these are not imposed on other contracts. The
+/// nested `proxy(...)` options support `visibility`, `async_name`, `blocking_name`,
+/// `default_service`, `default_path`, `gen_async`, and `gen_blocking`.
+/// `TraitServer` is a tuple wrapper, constructed as `TraitServer(implementation)`. Typed
+/// ObjectManager discovery is provided by `TraitObjectManagerProxyExt` (and
+/// `TraitObjectManagerProxyBlockingExt`) so it cannot collide with contract proxy methods.
+///
+/// ```
+/// #[zbus::interface(
+///     name = "org.example.Counter",
+///     property_snapshot(derive(Clone, PartialEq, Eq)),
+///     proxy(default_service = "org.example.CounterService", visibility = "pub")
+/// )]
+/// pub trait Counter {
+///     async fn increment(&mut self, by: u32) -> u32;
+///
+///     #[zbus(property)]
+///     fn value(&self) -> u32;
+/// }
+///
+/// struct CounterImpl(u32);
+///
+/// impl Counter for CounterImpl {
+///     async fn increment(&mut self, by: u32) -> u32 {
+///         self.0 += by;
+///         self.0
+///     }
+///
+///     fn value(&self) -> u32 {
+///         self.0
+///     }
+/// }
+///
+/// let server = CounterServer(CounterImpl(0));
+/// # let _ = server;
+/// ```
+///
 /// [`ObjectServer`]: https://docs.rs/zbus/latest/zbus/object_server/struct.ObjectServer.html
 /// [`ObjectServer::with`]: https://docs.rs/zbus/latest/zbus/object_server/struct.ObjectServer.html#method.with
 /// [`Connection`]: https://docs.rs/zbus/latest/zbus/connection/struct.Connection.html
@@ -394,10 +441,16 @@ pub fn proxy(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn interface(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr with Punctuated<Meta, Token![,]>::parse_terminated);
-    let input = parse_macro_input!(item as ItemImpl);
-    iface::expand(args, input)
-        .unwrap_or_else(|err| err.to_compile_error())
-        .into()
+    let input = parse_macro_input!(item as Item);
+    let result = match input {
+        Item::Impl(input) => iface::expand(args, input),
+        Item::Trait(input) => iface::expand_trait(args, input),
+        input => Err(syn::Error::new_spanned(
+            input,
+            "`interface` can only be used on an impl block or trait",
+        )),
+    };
+    result.unwrap_or_else(|err| err.to_compile_error()).into()
 }
 
 /// Derive macro for implementing [`zbus::DBusError`] trait.

@@ -1,0 +1,10 @@
+[package]
+name = "zbus-macros-downstream-renamed"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+renamed_zbus = { package = "zbus", path = "../../../zbus", default-features = false, features = ["async-io"] }

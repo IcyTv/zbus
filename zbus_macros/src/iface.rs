@@ -3,11 +3,11 @@ use quote::{format_ident, quote};
 use std::collections::BTreeMap;
 use syn::{
     AngleBracketedGenericArguments, Attribute, Error, Expr, ExprLit, FnArg, GenericArgument, Ident,
-    ImplItem, ImplItemFn, ItemImpl, Lit,
+    ImplItem, ImplItemFn, ItemImpl, ItemTrait, Lit,
     Lit::Str,
-    Meta, MetaNameValue, PatType, PathArguments, ReturnType, Signature, Token, Type, TypePath,
-    Visibility,
-    parse::{Parse, ParseStream},
+    Meta, MetaNameValue, PatType, Path, PathArguments, ReturnType, Signature, Token, TraitItem,
+    Type, TypePath, Visibility,
+    parse::{Parse, ParseStream, Parser},
     parse_quote, parse_str,
     punctuated::Punctuated,
     spanned::Spanned,
@@ -63,6 +63,11 @@ def_attrs! {
                 no_autostart none,
                 allow_interactive_auth none
             }
+        },
+        object_manager {
+            pub ObjectManagerAttributes("object_manager") {
+                skip none
+            }
         }
     };
 
@@ -72,6 +77,30 @@ def_attrs! {
         header none,
         signal_context none,
         signal_emitter none
+    };
+
+    pub TraitInterfaceAttributes("trait") {
+        interface expr,
+        name expr,
+        spawn bool,
+        introspection_docs bool,
+        crate_path str,
+        server_name str,
+        property_snapshot_name str,
+        managed_property_snapshot_name str,
+        object_manager_name str,
+        proxy {
+            pub TraitProxyAttributes("proxy") {
+                assume_defaults bool,
+                default_path str,
+                default_service str,
+                async_name str,
+                blocking_name str,
+                gen_async bool,
+                gen_blocking bool,
+                visibility str
+            }
+        }
     };
 }
 
@@ -100,6 +129,7 @@ struct Property {
     emits_changed_signal: PropertyEmitsChangedSignal,
     ty: Option<Type>,
     doc_comments: TokenStream,
+    cfg_attrs: Vec<Attribute>,
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -306,6 +336,876 @@ impl MethodInfo {
     }
 }
 
+#[derive(Debug)]
+struct TraitProperty {
+    field: Ident,
+    ty: Option<Type>,
+    setter_ty: Option<Type>,
+    fallible: bool,
+    read: bool,
+    write: bool,
+    skip: bool,
+    emits_changed_signal: PropertyEmitsChangedSignal,
+    cfg_attrs: Vec<Attribute>,
+    setter_cfg_attrs: Vec<Attribute>,
+}
+
+fn cfg_attrs(attrs: &[Attribute]) -> Vec<Attribute> {
+    attrs
+        .iter()
+        .filter_map(|attr| {
+            if attr.path().is_ident("cfg") {
+                return Some(attr.clone());
+            }
+            if !attr.path().is_ident("cfg_attr") {
+                return None;
+            }
+
+            let nested = attr
+                .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+                .ok()?;
+            let mut nested = nested.into_iter();
+            let predicate = nested.next()?;
+            let cfg = nested
+                .filter(|meta| meta.path().is_ident("cfg"))
+                .collect::<Vec<_>>();
+            (!cfg.is_empty()).then(|| parse_quote!(#[cfg_attr(#predicate, #(#cfg),*)]))
+        })
+        .collect()
+}
+
+fn cfg_key(attrs: &[Attribute]) -> Vec<String> {
+    let mut key = attrs
+        .iter()
+        .map(|attr| quote!(#attr).to_string())
+        .collect::<Vec<_>>();
+    key.sort();
+    key
+}
+
+fn property_type_key(ty: &Type) -> String {
+    match ty {
+        Type::Reference(reference) => property_type_key(&reference.elem),
+        Type::Paren(paren) => property_type_key(&paren.elem),
+        Type::Group(group) => property_type_key(&group.elem),
+        Type::Slice(slice) => format!("Vec<{}>", property_type_key(&slice.elem)),
+        Type::Path(path) => {
+            let Some(segment) = path.path.segments.last() else {
+                return quote!(#ty).to_string().replace(' ', "");
+            };
+            let ident = segment.ident.to_string();
+            if ident == "String" || ident == "str" {
+                return "str".to_string();
+            }
+            if ident == "Vec" || ident == "Option" {
+                let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                    return quote!(#ty).to_string().replace(' ', "");
+                };
+                let Some(GenericArgument::Type(inner)) = arguments.args.first() else {
+                    return quote!(#ty).to_string().replace(' ', "");
+                };
+                return format!("{ident}<{}>", property_type_key(inner));
+            }
+            quote!(#ty).to_string().replace(' ', "")
+        }
+        _ => quote!(#ty).to_string().replace(' ', ""),
+    }
+}
+
+fn take_property_snapshot_derives(
+    args: Punctuated<Meta, Token![,]>,
+) -> syn::Result<(Punctuated<Meta, Token![,]>, Vec<Path>)> {
+    let mut remaining = Punctuated::new();
+    let mut derives = None;
+
+    for meta in args {
+        if !meta.path().is_ident("property_snapshot") {
+            remaining.push(meta);
+            continue;
+        }
+        if derives.is_some() {
+            return Err(Error::new_spanned(
+                meta,
+                "duplicate `property_snapshot` attribute",
+            ));
+        }
+
+        let nested = meta
+            .require_list()?
+            .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)?;
+        if nested.len() != 1 || !nested[0].path().is_ident("derive") {
+            return Err(Error::new_spanned(
+                nested,
+                "expected `property_snapshot(derive(...))`",
+            ));
+        }
+        let paths = nested[0]
+            .require_list()?
+            .parse_args_with(Punctuated::<Path, Token![,]>::parse_terminated)?;
+        let mut seen = std::collections::BTreeSet::new();
+        let mut parsed = Vec::new();
+        for path in paths {
+            let name = path
+                .segments
+                .last()
+                .expect("paths have at least one segment")
+                .ident
+                .to_string();
+            if matches!(
+                name.as_str(),
+                "Debug" | "SerializeDict" | "DeserializeDict" | "Type"
+            ) {
+                return Err(Error::new_spanned(
+                    path,
+                    format!("`{name}` is already derived for property snapshots"),
+                ));
+            }
+            let key = quote!(#path).to_string();
+            if !seen.insert(key) {
+                return Err(Error::new_spanned(
+                    path,
+                    "duplicate property snapshot derive",
+                ));
+            }
+            parsed.push(path);
+        }
+        derives = Some(parsed);
+    }
+
+    Ok((remaining, derives.unwrap_or_default()))
+}
+
+pub fn expand_trait(
+    args: Punctuated<Meta, Token![,]>,
+    mut input: ItemTrait,
+) -> syn::Result<TokenStream> {
+    let (args, property_snapshot_derives) = take_property_snapshot_derives(args)?;
+    let attrs = TraitInterfaceAttributes::parse_nested_metas(args)?;
+    if !input.generics.params.is_empty() {
+        return Err(Error::new_spanned(
+            &input.generics,
+            "generic D-Bus interface traits are not supported",
+        ));
+    }
+
+    let crate_path = parse_crate_path(attrs.crate_path.as_deref())?;
+    let zbus = zbus_path(crate_path.as_ref());
+    let zvariant_crate = format!(
+        "{}::zvariant",
+        zbus.to_string().replace(' ', "").trim_start_matches("::")
+    );
+    let trait_ident = input.ident.clone();
+    let vis = input.vis.clone();
+    let server_ident = Ident::new(
+        attrs
+            .server_name
+            .as_deref()
+            .unwrap_or(&format!("{trait_ident}Server")),
+        trait_ident.span(),
+    );
+    let properties_ident = Ident::new(
+        attrs
+            .property_snapshot_name
+            .as_deref()
+            .unwrap_or(&format!("{trait_ident}Properties")),
+        trait_ident.span(),
+    );
+    let managed_properties_ident = Ident::new(
+        attrs
+            .managed_property_snapshot_name
+            .as_deref()
+            .unwrap_or(&format!("{trait_ident}ManagedProperties")),
+        trait_ident.span(),
+    );
+    let object_ident = Ident::new(
+        attrs
+            .object_manager_name
+            .as_deref()
+            .unwrap_or(&format!("{trait_ident}Object")),
+        trait_ident.span(),
+    );
+    let managed_objects_ident = format_ident!("{trait_ident}ManagedObjects");
+
+    let iface_expr = match (attrs.name.as_ref(), attrs.interface.as_ref()) {
+        (Some(name), None) | (None, Some(name)) => quote!(#name),
+        (None, None) => {
+            let name = format!("org.freedesktop.{trait_ident}");
+            quote!(#name)
+        }
+        (Some(_), Some(_)) => {
+            return Err(Error::new_spanned(
+                &input,
+                "`name` and `interface` attributes should not be specified at the same time",
+            ));
+        }
+    };
+    let iface_literal = match (attrs.name.as_ref(), attrs.interface.as_ref()) {
+        (
+            Some(Expr::Lit(ExprLit {
+                lit: Lit::Str(name),
+                ..
+            })),
+            None,
+        )
+        | (
+            None,
+            Some(Expr::Lit(ExprLit {
+                lit: Lit::Str(name),
+                ..
+            })),
+        ) => name.value(),
+        (None, None) => format!("org.freedesktop.{trait_ident}"),
+        _ => {
+            return Err(Error::new_spanned(
+                &input,
+                "trait-form interfaces require a string literal interface name",
+            ));
+        }
+    };
+    zbus_names::InterfaceName::try_from(iface_literal.as_str())
+        .map_err(|e| Error::new(input.span(), format!("{e}")))?;
+
+    let mut proxy_attrs = attrs.proxy.unwrap_or_default();
+    let gen_async = proxy_attrs.gen_async.unwrap_or(true);
+    #[cfg(feature = "blocking-api")]
+    let gen_blocking = proxy_attrs.gen_blocking.unwrap_or(true);
+    #[cfg(not(feature = "blocking-api"))]
+    let gen_blocking = false;
+    #[cfg(not(feature = "blocking-api"))]
+    {
+        proxy_attrs.blocking_name = None;
+    }
+    let async_proxy_name = proxy_attrs
+        .async_name
+        .clone()
+        .unwrap_or_else(|| format!("{trait_ident}Proxy"));
+    if gen_async && proxy_attrs.async_name.is_none() {
+        proxy_attrs.async_name = Some(async_proxy_name.clone());
+    }
+    let blocking_proxy_name = proxy_attrs.blocking_name.clone().unwrap_or_else(|| {
+        if gen_async {
+            format!("{trait_ident}ProxyBlocking")
+        } else {
+            format!("{trait_ident}Proxy")
+        }
+    });
+    if gen_blocking && proxy_attrs.blocking_name.is_none() {
+        proxy_attrs.blocking_name = Some(blocking_proxy_name.clone());
+    }
+    if proxy_attrs.visibility.is_none() {
+        proxy_attrs.visibility = Some(quote!(#vis).to_string());
+    }
+
+    let mut adapter_methods = TokenStream::new();
+    let mut behavior_items = Vec::new();
+    let mut properties = BTreeMap::<String, TraitProperty>::new();
+
+    for item in &input.items {
+        let TraitItem::Fn(method) = item else {
+            return Err(Error::new_spanned(
+                item,
+                "only methods are supported in D-Bus interface traits",
+            ));
+        };
+        let method_attrs = MethodAttributes::parse(&method.attrs)?;
+        let is_signal = method_attrs.signal;
+        let adapter_attrs = method.attrs.clone();
+        let sig = &method.sig;
+
+        if method.default.is_some() {
+            return Err(Error::new_spanned(
+                method,
+                "default method bodies are not supported in D-Bus interface traits",
+            ));
+        }
+        if is_signal {
+            adapter_methods.extend(quote! {
+                #(#adapter_attrs)*
+                #sig;
+            });
+            continue;
+        }
+
+        let receiver = sig
+            .inputs
+            .first()
+            .and_then(|arg| match arg {
+                FnArg::Receiver(receiver) => Some(receiver),
+                _ => None,
+            })
+            .ok_or_else(|| Error::new_spanned(sig, "interface methods must have a receiver"))?;
+        if !matches!(receiver.kind, syn::ReceiverKind::Reference(..)) {
+            return Err(Error::new_spanned(
+                receiver,
+                "interface methods must take `&self` or `&mut self`",
+            ));
+        }
+        let call_args = sig
+            .inputs
+            .iter()
+            .skip(1)
+            .map(|arg| match arg {
+                FnArg::Typed(arg) => pat_ident(arg)
+                    .cloned()
+                    .ok_or_else(|| Error::new_spanned(arg, "arguments must be simple identifiers")),
+                FnArg::Receiver(arg) => Err(Error::new_spanned(arg, "unexpected receiver")),
+            })
+            .collect::<syn::Result<Vec<_>>>()?;
+        let method_ident = &sig.ident;
+        let wait = sig.asyncness.is_some().then(|| quote!(.await));
+        adapter_methods.extend(quote! {
+            #(#adapter_attrs)*
+            #sig {
+                self.0.#method_ident(#(#call_args),*)#wait
+            }
+        });
+
+        let mut behavior_method = method.clone();
+        behavior_method
+            .attrs
+            .retain(|attr| !attr.path().is_ident("zbus"));
+        clear_input_arg_attrs(&mut behavior_method.sig.inputs);
+        if behavior_method.sig.asyncness.take().is_some() {
+            let output = match &behavior_method.sig.output {
+                ReturnType::Default => quote!(()),
+                ReturnType::Type(_, ty) => quote!(#ty),
+            };
+            behavior_method.sig.output = parse_quote!(
+                -> impl ::std::future::Future<Output = #output> + ::std::marker::Send
+            );
+        }
+        behavior_items.push(TraitItem::Fn(behavior_method));
+
+        if method_attrs.property.is_some() {
+            let regular_args = sig
+                .inputs
+                .iter()
+                .filter_map(typed_arg)
+                .filter(|arg| !is_special_arg(&arg.attrs))
+                .collect::<Vec<_>>();
+            let is_setter = !regular_args.is_empty();
+            if is_setter && regular_args.len() != 1 {
+                return Err(Error::new_spanned(
+                    sig,
+                    "property setters must have exactly one value argument",
+                ));
+            }
+            if is_setter
+                && method_attrs.name.is_none()
+                && !method_ident.to_string().starts_with("set_")
+            {
+                return Err(Error::new_spanned(
+                    method_ident,
+                    "property setter names must start with `set_` or specify `name`",
+                ));
+            }
+            let mut member_name = method_attrs.name.clone().unwrap_or_else(|| {
+                let mut name = method_ident.to_string();
+                if is_setter {
+                    name = name.strip_prefix("set_").unwrap_or(&name).to_string();
+                }
+                pascal_case(name.strip_prefix("r#").unwrap_or(&name))
+            });
+            if member_name.starts_with("r#") {
+                member_name = member_name[2..].to_string();
+            }
+            let property = properties
+                .entry(member_name)
+                .or_insert_with(|| TraitProperty {
+                    field: if is_setter {
+                        format_ident!(
+                            "{}",
+                            method_ident
+                                .to_string()
+                                .strip_prefix("set_")
+                                .unwrap_or(&method_ident.to_string())
+                        )
+                    } else {
+                        method_ident.clone()
+                    },
+                    ty: None,
+                    setter_ty: None,
+                    fallible: false,
+                    read: false,
+                    write: false,
+                    skip: false,
+                    emits_changed_signal: PropertyEmitsChangedSignal::True,
+                    cfg_attrs: Vec::new(),
+                    setter_cfg_attrs: Vec::new(),
+                });
+            if is_setter {
+                if property.write {
+                    return Err(Error::new_spanned(method, "duplicate property setter"));
+                }
+                property.write = true;
+                property.setter_ty = Some((*regular_args[0].ty).clone());
+                property.setter_cfg_attrs = cfg_attrs(&method.attrs);
+                if method_attrs.object_manager.is_some() {
+                    return Err(Error::new_spanned(
+                        method,
+                        "`object_manager` is only valid on property getters",
+                    ));
+                }
+            } else {
+                if property.read {
+                    return Err(Error::new_spanned(method, "duplicate property getter"));
+                }
+                property.read = true;
+                property.field = method_ident.clone();
+                property.cfg_attrs = cfg_attrs(&method.attrs);
+                property.emits_changed_signal = method_attrs
+                    .property
+                    .as_ref()
+                    .and_then(|attrs| attrs.emits_changed_signal.as_deref())
+                    .map(|value| PropertyEmitsChangedSignal::parse(value, method.span()))
+                    .transpose()?
+                    .unwrap_or(PropertyEmitsChangedSignal::True);
+                property.skip = method_attrs
+                    .object_manager
+                    .as_ref()
+                    .is_some_and(|attrs| attrs.skip);
+                let ReturnType::Type(_, output) = &sig.output else {
+                    return Err(Error::new_spanned(
+                        &sig.output,
+                        "property getters must return a value",
+                    ));
+                };
+                let mut ty = output.as_ref();
+                if let Type::Path(path) = ty
+                    && path
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|s| s.ident == "Result")
+                {
+                    property.fallible = true;
+                    ty = get_result_inner_type(path)?;
+                }
+                property.ty = Some(ty.clone());
+            }
+        } else if method_attrs.object_manager.is_some() {
+            return Err(Error::new_spanned(
+                method,
+                "`object_manager` is only valid on property getters",
+            ));
+        }
+    }
+    for (name, property) in &properties {
+        if property.read && property.write {
+            if property.ty.as_ref().map(property_type_key)
+                != property.setter_ty.as_ref().map(property_type_key)
+            {
+                return Err(Error::new(
+                    property.field.span(),
+                    format!(
+                        "getter and setter for property `{name}` must use compatible wire types"
+                    ),
+                ));
+            }
+            if cfg_key(&property.cfg_attrs) != cfg_key(&property.setter_cfg_attrs) {
+                return Err(Error::new(
+                    property.field.span(),
+                    format!(
+                        "getter and setter for property `{name}` must use the same cfg attributes"
+                    ),
+                ));
+            }
+        }
+    }
+    input.items = behavior_items;
+
+    let property_field = |name: &String, property: &TraitProperty| {
+        let field = &property.field;
+        let ty = property.ty.as_ref().unwrap();
+        let ty = if property.fallible {
+            quote!(::std::option::Option<#ty>)
+        } else {
+            quote!(#ty)
+        };
+        let cfg_attrs = &property.cfg_attrs;
+        let required = (!property.fallible).then(|| quote!(#[zvariant(required)]));
+        quote! {
+            #(#cfg_attrs)*
+            #[zvariant(rename = #name)]
+            #required
+            pub #field: #ty
+        }
+    };
+    let snapshot_fields = properties
+        .iter()
+        .filter_map(|(name, property)| {
+            if !property.read {
+                return None;
+            }
+            Some(property_field(name, property))
+        })
+        .collect::<Vec<_>>();
+    let managed_snapshot_fields = properties
+        .iter()
+        .filter_map(|(name, property)| {
+            if !property.read || property.skip {
+                return None;
+            }
+            Some(property_field(name, property))
+        })
+        .collect::<Vec<_>>();
+    let property_names =
+        properties
+            .iter()
+            .filter(|(_, property)| property.read)
+            .map(|(name, property)| {
+                let cfg_attrs = &property.cfg_attrs;
+                quote!(#(#cfg_attrs)* #name)
+            });
+    let mutable_property_names = properties
+        .iter()
+        .filter(|(_, property)| {
+            property.read && property.emits_changed_signal != PropertyEmitsChangedSignal::Const
+        })
+        .map(|(name, property)| {
+            let cfg_attrs = &property.cfg_attrs;
+            quote!(#(#cfg_attrs)* #name)
+        });
+    let object_field = format_ident!(
+        "{}",
+        case::snake_or_kebab_case(&trait_ident.to_string(), true)
+    );
+
+    let spawn = attrs.spawn.map(|value| quote!(spawn = #value,));
+    let introspection_docs = attrs
+        .introspection_docs
+        .map(|value| quote!(introspection_docs = #value,));
+    let crate_arg = attrs
+        .crate_path
+        .as_ref()
+        .map(|value| quote!(crate = #value,));
+    let proxy_tokens = trait_proxy_tokens(&proxy_attrs);
+    let impl_args = Punctuated::<Meta, Token![,]>::parse_terminated.parse2(quote! {
+        name = #iface_expr,
+        #spawn
+        #introspection_docs
+        #crate_arg
+        proxy(#proxy_tokens)
+    })?;
+    let adapter_impl: ItemImpl = syn::parse2(quote! {
+        impl<T> #server_ident<T>
+        where
+            T: #trait_ident + ::std::marker::Send + ::std::marker::Sync + 'static,
+        {
+            #adapter_methods
+        }
+    })?;
+    let interface_impl = expand(impl_args, adapter_impl)?;
+
+    let async_proxy_ident = Ident::new(&async_proxy_name, trait_ident.span());
+    let blocking_proxy_ident = Ident::new(&blocking_proxy_name, trait_ident.span());
+    let async_extension_ident = format_ident!("{trait_ident}ObjectManagerProxyExt");
+    let blocking_extension_ident = format_ident!("{trait_ident}ObjectManagerProxyBlockingExt");
+    let async_discovery = gen_async.then(|| quote! {
+        #vis trait #async_extension_ident {
+            /// Calls the standard ObjectManager interface and decodes this interface's view.
+            fn get_managed_objects_typed(
+                &self,
+            ) -> impl ::std::future::Future<Output = #zbus::Result<#managed_objects_ident>> + ::std::marker::Send;
+        }
+
+        impl<'p> #async_extension_ident for #async_proxy_ident<'p> {
+            fn get_managed_objects_typed(
+                &self,
+            ) -> impl ::std::future::Future<Output = #zbus::Result<#managed_objects_ident>> + ::std::marker::Send {
+                async move {
+                self.inner()
+                    .connection()
+                    .call_method(
+                        ::std::option::Option::Some(self.inner().destination()),
+                        self.inner().path(),
+                        ::std::option::Option::Some("org.freedesktop.DBus.ObjectManager"),
+                        "GetManagedObjects",
+                        &(),
+                    )
+                    .await?
+                    .body()
+                    .deserialize()
+                }
+            }
+        }
+    });
+    let blocking_discovery = gen_blocking.then(|| {
+        quote! {
+            #vis trait #blocking_extension_ident {
+                /// Calls the standard ObjectManager interface and decodes this interface's view.
+                fn get_managed_objects_typed(&self) -> #zbus::Result<#managed_objects_ident>;
+            }
+
+            impl<'p> #blocking_extension_ident for #blocking_proxy_ident<'p> {
+                fn get_managed_objects_typed(&self) -> #zbus::Result<#managed_objects_ident> {
+                    self.inner()
+                        .connection()
+                        .call_method(
+                            ::std::option::Option::Some(self.inner().destination()),
+                            self.inner().path(),
+                            ::std::option::Option::Some("org.freedesktop.DBus.ObjectManager"),
+                            "GetManagedObjects",
+                            &(),
+                        )?
+                        .body()
+                        .deserialize()
+                }
+            }
+        }
+    });
+
+    Ok(quote! {
+        #input
+
+        #[derive(Debug)]
+        #vis struct #server_ident<T>(pub T);
+
+        #[derive(
+            Debug,
+            #zbus::zvariant::SerializeDict,
+            #zbus::zvariant::DeserializeDict,
+            #zbus::zvariant::Type,
+            #(#property_snapshot_derives),*
+        )]
+        #[zvariant(signature = "a{sv}", crate = #zvariant_crate)]
+        #vis struct #properties_ident {
+            #(#snapshot_fields,)*
+        }
+
+        impl #properties_ident {
+            pub const INTERFACE_NAME: &'static str = #iface_literal;
+            pub const PROPERTY_NAMES: &'static [&'static str] = &[#(#property_names,)*];
+            /// Readable properties that are not declared `emits_changed_signal = "const"`.
+            /// This includes `true`, `invalidates`, and `false` properties.
+            pub const MUTABLE_PROPERTY_NAMES: &'static [&'static str] = &[#(#mutable_property_names,)*];
+        }
+
+        #[derive(Debug, #zbus::zvariant::DeserializeDict, #zbus::zvariant::Type)]
+        #[zvariant(signature = "a{sv}", crate = #zvariant_crate)]
+        #vis struct #managed_properties_ident {
+            #(#managed_snapshot_fields,)*
+        }
+
+        #[derive(Debug, #zbus::zvariant::DeserializeDict, #zbus::zvariant::Type)]
+        #[zvariant(signature = "a{sa{sv}}", crate = #zvariant_crate)]
+        #vis struct #object_ident {
+            #[zvariant(rename = #iface_literal)]
+            pub #object_field: ::std::option::Option<#managed_properties_ident>,
+        }
+
+        #vis type #managed_objects_ident = ::std::collections::HashMap<
+            #zbus::zvariant::OwnedObjectPath,
+            #object_ident,
+        >;
+
+        #interface_impl
+        #async_discovery
+        #blocking_discovery
+    })
+}
+
+fn trait_proxy_tokens(attrs: &TraitProxyAttributes) -> TokenStream {
+    let assume_defaults = attrs
+        .assume_defaults
+        .map(|value| quote!(assume_defaults = #value,));
+    let default_path = attrs
+        .default_path
+        .as_ref()
+        .map(|value| quote!(default_path = #value,));
+    let default_service = attrs
+        .default_service
+        .as_ref()
+        .map(|value| quote!(default_service = #value,));
+    let async_name = attrs
+        .async_name
+        .as_ref()
+        .map(|value| quote!(async_name = #value,));
+    let blocking_name = attrs
+        .blocking_name
+        .as_ref()
+        .map(|value| quote!(blocking_name = #value,));
+    let gen_async = attrs.gen_async.map(|value| quote!(gen_async = #value,));
+    let gen_blocking = attrs
+        .gen_blocking
+        .map(|value| quote!(gen_blocking = #value,));
+    let visibility = attrs
+        .visibility
+        .as_ref()
+        .map(|value| quote!(visibility = #value,));
+    quote! {
+        #assume_defaults
+        #default_path
+        #default_service
+        #async_name
+        #blocking_name
+        #gen_async
+        #gen_blocking
+        #visibility
+    }
+}
+
+#[cfg(test)]
+mod trait_tests {
+    use super::*;
+
+    fn expand_error(args: TokenStream, input: ItemTrait) -> String {
+        let args = Punctuated::<Meta, Token![,]>::parse_terminated
+            .parse2(args)
+            .unwrap();
+        expand_trait(args, input).unwrap_err().to_string()
+    }
+
+    #[test]
+    fn default_method_bodies_are_rejected() {
+        let input: ItemTrait = parse_quote! {
+            trait DefaultMethod {
+                async fn value(&self) -> u32 {
+                    42
+                }
+            }
+        };
+
+        let error = expand_error(quote!(name = "org.example.DefaultMethod"), input);
+        assert!(error.contains("default method bodies are not supported"));
+    }
+
+    #[test]
+    fn generated_cfg_attrs_exclude_unrelated_cfg_attr_payloads() {
+        let attrs: Vec<Attribute> = vec![
+            parse_quote!(#[cfg(unix)]),
+            parse_quote!(#[cfg_attr(feature = "conditional", cfg(target_os = "linux"), inline)]),
+        ];
+        let generated = cfg_attrs(&attrs);
+        let rendered = quote!(#(#generated)*).to_string();
+        assert!(rendered.contains("cfg (unix)"));
+        assert!(rendered.contains("cfg (target_os = \"linux\")"));
+        assert!(!rendered.contains("inline"));
+    }
+
+    #[test]
+    fn malformed_properties_are_rejected() {
+        let malformed_name: ItemTrait = parse_quote! {
+            trait Contract {
+                #[zbus(property)]
+                fn update(&mut self, value: u32);
+            }
+        };
+        assert!(
+            expand_error(quote!(name = "org.example.Contract"), malformed_name)
+                .contains("must start with `set_`")
+        );
+
+        let too_many_values: ItemTrait = parse_quote! {
+            trait Contract {
+                #[zbus(property)]
+                fn set_value(&mut self, first: u32, second: u32);
+            }
+        };
+        assert!(
+            expand_error(quote!(name = "org.example.Contract"), too_many_values)
+                .contains("exactly one value argument")
+        );
+
+        let mismatched_types: ItemTrait = parse_quote! {
+            trait Contract {
+                #[zbus(property)]
+                fn set_value(&mut self, value: u64);
+                #[zbus(property)]
+                fn value(&self) -> u32;
+            }
+        };
+        assert!(
+            expand_error(quote!(name = "org.example.Contract"), mismatched_types)
+                .contains("must use compatible wire types")
+        );
+
+        let borrowed_setter: ItemTrait = parse_quote! {
+            trait Contract {
+                #[zbus(property)]
+                fn set_value(&mut self, value: &str);
+                #[zbus(property)]
+                fn value(&self) -> String;
+            }
+        };
+        let args = Punctuated::<Meta, Token![,]>::parse_terminated
+            .parse2(quote!(name = "org.example.Contract"))
+            .unwrap();
+        assert!(expand_trait(args, borrowed_setter).is_ok());
+
+        let mismatched_cfg: ItemTrait = parse_quote! {
+            trait Contract {
+                #[cfg(unix)]
+                #[zbus(property)]
+                fn set_value(&mut self, value: u32);
+                #[cfg(windows)]
+                #[zbus(property)]
+                fn value(&self) -> u32;
+            }
+        };
+        assert!(
+            expand_error(quote!(name = "org.example.Contract"), mismatched_cfg)
+                .contains("must use the same cfg attributes")
+        );
+    }
+
+    #[test]
+    fn setter_before_getter_is_supported() {
+        let input: ItemTrait = parse_quote! {
+            trait Contract {
+                #[zbus(property)]
+                fn set_value(&mut self, value: u32);
+                #[zbus(property)]
+                fn value(&self) -> u32;
+            }
+        };
+        let args = Punctuated::<Meta, Token![,]>::parse_terminated
+            .parse2(quote!(name = "org.example.Contract"))
+            .unwrap();
+        expand_trait(args, input).unwrap();
+    }
+
+    #[test]
+    fn invalid_property_snapshot_derives_are_rejected() {
+        let input: ItemTrait = parse_quote! { trait Contract { fn ping(&self); } };
+        assert!(
+            expand_error(
+                quote!(
+                    name = "org.example.Contract",
+                    property_snapshot(derive(Clone, Clone))
+                ),
+                input.clone(),
+            )
+            .contains("duplicate property snapshot derive")
+        );
+        assert!(
+            expand_error(
+                quote!(
+                    name = "org.example.Contract",
+                    property_snapshot(derive(Debug))
+                ),
+                input,
+            )
+            .contains("already derived")
+        );
+    }
+
+    #[cfg(feature = "blocking-api")]
+    #[test]
+    fn blocking_only_proxy_uses_standard_default_name() {
+        let input: ItemTrait = parse_quote! { trait Contract { fn ping(&self); } };
+        let args = Punctuated::<Meta, Token![,]>::parse_terminated
+            .parse2(quote!(
+                name = "org.example.Contract",
+                proxy(gen_async = false)
+            ))
+            .unwrap();
+        let output = expand_trait(args, input).unwrap().to_string();
+        assert!(output.contains("ContractProxy"));
+        assert!(!output.contains("ContractProxyBlocking"));
+    }
+}
+
 pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Result<TokenStream> {
     let impl_attrs = ImplAttributes::parse_nested_metas(args)?;
     let crate_path = parse_crate_path(impl_attrs.crate_path.as_deref())?;
@@ -410,11 +1310,8 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
             ));
         }
 
-        let cfg_attrs: Vec<_> = method
-            .attrs
-            .iter()
-            .filter(|a| a.path().is_ident("cfg"))
-            .collect();
+        let generated_cfg_attrs = cfg_attrs(&method.attrs);
+        let cfg_attrs = generated_cfg_attrs.iter().collect::<Vec<_>>();
         let doc_attrs: Vec<_> = method
             .attrs
             .iter()
@@ -442,8 +1339,12 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 };
                 property.read = true;
                 property.emits_changed_signal = emits_changed_signal;
+                property.cfg_attrs = generated_cfg_attrs.clone();
             } else {
                 property.write = true;
+                if !property.read {
+                    property.cfg_attrs = generated_cfg_attrs.clone();
+                }
                 if prop_attrs.emits_changed_signal.is_some() {
                     return Err(Error::new_spanned(
                         method,
@@ -489,8 +1390,14 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
 
         match method_type {
             MethodType::Signal => {
-                introspect.extend(doc_comments);
-                introspect.extend(introspect_signal(&member_name, &intro_args));
+                let signal_introspection = introspect_signal(&member_name, &intro_args);
+                introspect.extend(quote! {
+                    #(#cfg_attrs)*
+                    {
+                        #doc_comments
+                        #signal_introspection
+                    }
+                });
                 let signal_emitter = signal_emitter_arg.unwrap().pat;
 
                 method.block = parse_quote!({
@@ -513,6 +1420,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                     quote! { #(#doc_attrs)* }
                 };
                 signals_trait_methods.extend(quote! {
+                    #(#cfg_attrs)*
                     #signal_docs
                     #sig;
                 });
@@ -574,8 +1482,8 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                     // * For all other arg types, we convert the passed value to `OwnedValue` first
                     //   and then pass it as `Value` (so `TryFrom<OwnedValue>` is required).
                     let value_to_owned = quote! {
-                        match ::zbus::zvariant::Value::try_to_owned(value) {
-                            ::std::result::Result::Ok(val) => ::zbus::zvariant::Value::from(val),
+                        match #zbus::zvariant::Value::try_to_owned(value) {
+                            ::std::result::Result::Ok(val) => #zbus::zvariant::Value::from(val),
                             ::std::result::Result::Err(e) => {
                                 return ::std::result::Result::Err(
                                     ::std::convert::Into::into(#zbus::Error::Variant(::std::convert::Into::into(e)))
@@ -614,7 +1522,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                                     .args
                                     .first()
                                     .filter(|arg| matches!(arg, GenericArgument::Lifetime(_)))
-                                    .map(|_| quote!(match ::zbus::zvariant::Value::try_clone(value) {
+                                    .map(|_| quote!(match #zbus::zvariant::Value::try_clone(value) {
                                         ::std::result::Result::Ok(val) => val,
                                         ::std::result::Result::Err(e) => {
                                             return ::std::result::Result::Err(
@@ -760,7 +1668,10 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                         })
                     };
 
-                    get_all.extend(q);
+                    get_all.extend(quote! {
+                        #(#cfg_attrs)*
+                        #q
+                    });
 
                     let prop_value_handled = if is_fallible_property {
                         quote!(self.#ident(#args_names)#method_await?)
@@ -776,6 +1687,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                              its setter method."
                         );
                         let prop_changed_method = quote!(
+                            #(#cfg_attrs)*
                             #[doc = #changed_doc]
                             pub async fn #prop_changed_method_name(
                                 &self,
@@ -809,6 +1721,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                              (causing excess traffic on the bus)."
                         );
                         let prop_invalidate_method = quote!(
+                            #(#cfg_attrs)*
                             #[doc = #invalidate_doc]
                             pub async fn #prop_invalidate_method_name(
                                 &self,
@@ -828,8 +1741,14 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                 }
             }
             MethodType::Other => {
-                introspect.extend(doc_comments);
-                introspect.extend(introspect_method(&member_name, &intro_args));
+                let method_introspection = introspect_method(&member_name, &intro_args);
+                introspect.extend(quote! {
+                    #(#cfg_attrs)*
+                    {
+                        #doc_comments
+                        #method_introspection
+                    }
+                });
 
                 let m = quote! {
                     #(#cfg_attrs)*
@@ -838,7 +1757,7 @@ pub fn expand(args: Punctuated<Meta, Token![,]>, mut input: ItemImpl) -> syn::Re
                             #args_from_msg
                             let reply = self.#ident(#args_names)#method_await;
                             let hdr = __zbus__message.header();
-                            if hdr.primary().flags().contains(zbus::message::Flags::NoReplyExpected) {
+                            if hdr.primary().flags().contains(#zbus::message::Flags::NoReplyExpected) {
                                 Ok(())
                             } else {
                                 #reply
@@ -1448,14 +2367,18 @@ fn introspect_properties(
         let ty = prop.ty.unwrap();
 
         let doc_comments = prop.doc_comments;
+        let cfg_attrs = prop.cfg_attrs;
         if prop.emits_changed_signal == PropertyEmitsChangedSignal::True {
             let format_str = format!(
                 "{}<property name=\"{name}\" type=\"{}\" access=\"{access}\"/>",
                 "{:indent$}", "{}",
             );
             introspection.extend(quote!(
-                #doc_comments
-                ::std::writeln!(writer, #format_str, "", <#ty>::SIGNATURE, indent = level).unwrap();
+                #(#cfg_attrs)*
+                {
+                    #doc_comments
+                    ::std::writeln!(writer, #format_str, "", <#ty>::SIGNATURE, indent = level).unwrap();
+                }
             ));
         } else {
             let emits_changed_signal = prop.emits_changed_signal.to_string();
@@ -1467,12 +2390,15 @@ fn introspect_properties(
                 "{:indent$}", "{}", "{:annot_indent$}", "{:indent$}",
             );
             introspection.extend(quote!(
-                #doc_comments
-                ::std::writeln!(
-                    writer,
-                    #format_str,
-                    "", <#ty>::SIGNATURE, "", "", indent = level, annot_indent = level + 2,
-                ).unwrap();
+                #(#cfg_attrs)*
+                {
+                    #doc_comments
+                    ::std::writeln!(
+                        writer,
+                        #format_str,
+                        "", <#ty>::SIGNATURE, "", "", indent = level, annot_indent = level + 2,
+                    ).unwrap();
+                }
             ));
         }
     }

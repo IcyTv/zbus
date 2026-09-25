@@ -57,6 +57,10 @@ pub fn expand_serialize_dict_derive(
     let name = &input.ident;
     let helper = format_ident!("__SerializeDict{}", name);
     let zv = config.resolve_path(crate_attr.as_deref())?;
+    let serde_crate = format!(
+        "{}::export::serde",
+        quote!(#zv).to_string().replace(' ', "")
+    );
 
     let mut field_defs = Vec::new();
     let mut field_inits = Vec::new();
@@ -66,11 +70,12 @@ pub fn expand_serialize_dict_derive(
     for field in &data.fields {
         let ident = field.ident.as_ref().unwrap();
         let ty = &field.ty;
-        let FieldAttributes { rename, .. } =
-            FieldAttributes::parse_with_lists(&field.attrs, config.attr_lists)?;
+        let FieldAttributes {
+            rename, required, ..
+        } = FieldAttributes::parse_with_lists(&field.attrs, config.attr_lists)?;
         let dict_name = dict_name_for_field(field, rename, rename_all.as_deref())?;
         let is_opt = macros::ty_is_option(ty);
-        let field_def = match (value_is_variant, is_opt) {
+        let field_def = match (value_is_variant, is_opt && !required) {
             (true, true) => {
                 let path = format!("{}::as_value::optional", quote! { #zv });
                 quote! {
@@ -123,6 +128,17 @@ pub fn expand_serialize_dict_derive(
             }
         }
     });
+    let (phantom_field, phantom_init) = if field_defs.is_empty() {
+        (
+            quote! {
+                #[serde(skip)]
+                __zvariant_phantom: ::std::marker::PhantomData<&'a ()>,
+            },
+            quote! { __zvariant_phantom: ::std::marker::PhantomData, },
+        )
+    } else {
+        (quote! {}, quote! {})
+    };
 
     Ok(quote! {
         #[allow(deprecated)]
@@ -135,16 +151,15 @@ pub fn expand_serialize_dict_derive(
 
                 #opt_serializer
 
-                #[derive(Serialize)]
-                #[serde(rename_all = #rename_all_str)]
+                #[derive(#zv::export::serde::Serialize)]
+                #[serde(crate = #serde_crate, rename_all = #rename_all_str)]
                 struct #helper<'a> {
-                    #[serde(skip)]
-                    phantom: ::std::marker::PhantomData<&'a ()>,
+                    #phantom_field
                     #(#field_defs,)*
                 }
 
                 let helper = #helper {
-                    phantom: ::std::marker::PhantomData,
+                    #phantom_init
                     #(#field_inits,)*
                 };
 
@@ -186,6 +201,10 @@ pub fn expand_deserialize_dict_derive(
     let (_, orig_ty_generics, _) = input.generics.split_for_impl();
     let name = &input.ident;
     let helper = format_ident!("__DeserializeDict{}", name);
+    let serde_crate = format!(
+        "{}::export::serde",
+        quote!(#zv).to_string().replace(' ', "")
+    );
 
     let mut field_defs = Vec::new();
     let mut field_assignments = Vec::new();
@@ -201,8 +220,9 @@ pub fn expand_deserialize_dict_derive(
     for field in &data.fields {
         let ident = field.ident.as_ref().unwrap();
         let ty = &field.ty;
-        let FieldAttributes { rename, .. } =
-            FieldAttributes::parse_with_lists(&field.attrs, config.attr_lists)?;
+        let FieldAttributes {
+            rename, required, ..
+        } = FieldAttributes::parse_with_lists(&field.attrs, config.attr_lists)?;
         let dict_name = dict_name_for_field(field, rename, rename_all.as_deref())?;
         let is_opt = macros::ty_is_option(ty);
 
@@ -212,15 +232,20 @@ pub fn expand_deserialize_dict_derive(
             quote! { deserialize_with = #opt_path }
         };
 
-        if is_opt {
+        if is_opt && !required {
             field_defs.push(quote! {
                 #[serde(rename = #dict_name, #with_attr, default)]
                 #ident: #ty
             });
             field_assignments.push(quote! { #ident: helper.#ident });
         } else {
+            let required_with_attr = if value_is_variant {
+                quote! { deserialize_with = "__zv_dict_de_required" }
+            } else {
+                quote! { deserialize_with = "__zv_dict_de_required_plain" }
+            };
             field_defs.push(quote! {
-                #[serde(rename = #dict_name, #with_attr, default)]
+                #[serde(rename = #dict_name, #required_with_attr, default)]
                 #ident: ::std::option::Option<#ty>
             });
 
@@ -270,8 +295,28 @@ pub fn expand_deserialize_dict_derive(
 
                 #opt_deserializer
 
-                #[derive(Deserialize, Default)]
-                #[serde(default, rename_all = #rename_all_str #deny_attr)]
+                fn __zv_dict_de_required<'de, T, D>(
+                    deserializer: D,
+                ) -> ::std::result::Result<::std::option::Option<T>, D::Error>
+                where
+                    T: #zv::Type + #zv::export::serde::Deserialize<'de> + 'de,
+                    D: #zv::export::serde::Deserializer<'de>,
+                {
+                    #zv::as_value::deserialize(deserializer).map(::std::option::Option::Some)
+                }
+
+                fn __zv_dict_de_required_plain<'de, T, D>(
+                    deserializer: D,
+                ) -> ::std::result::Result<::std::option::Option<T>, D::Error>
+                where
+                    T: #zv::export::serde::Deserialize<'de> + 'de,
+                    D: #zv::export::serde::Deserializer<'de>,
+                {
+                    T::deserialize(deserializer).map(::std::option::Option::Some)
+                }
+
+                #[derive(#zv::export::serde::Deserialize, Default)]
+                #[serde(crate = #serde_crate, default, rename_all = #rename_all_str #deny_attr)]
                 struct #helper {
                     #(#field_defs,)*
                 }

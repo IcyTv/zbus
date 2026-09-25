@@ -448,6 +448,28 @@ fn nested_dict_value() {
     assert_eq!(typed_again, info);
 }
 
+#[cfg(feature = "option-as-array")]
+#[test]
+fn required_optional_dict_field_distinguishes_none_from_missing() {
+    let ctxt = Context::new_dbus(NATIVE_ENDIAN, 0);
+
+    #[derive(DeserializeDict, SerializeDict, Type, PartialEq, Debug)]
+    #[zvariant(signature = "a{sv}")]
+    struct RequiredOptional {
+        #[zvariant(required)]
+        value: Option<String>,
+    }
+
+    let value = RequiredOptional { value: None };
+    let encoded = to_bytes(ctxt, &value).unwrap();
+    let decoded: RequiredOptional = encoded.deserialize().unwrap().0;
+    assert_eq!(decoded, value);
+
+    let empty = HashMap::<&str, Value<'_>>::new();
+    let encoded = to_bytes(ctxt, &empty).unwrap();
+    assert!(encoded.deserialize::<RequiredOptional>().is_err());
+}
+
 #[test]
 fn nested_dict_object_path_keys() {
     let ctxt = Context::new_dbus(NATIVE_ENDIAN, 0);

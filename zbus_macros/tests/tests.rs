@@ -6,6 +6,208 @@ use std::future::ready;
 use zbus::{block_on, fdo, object_server::SignalEmitter, proxy::CacheProperties};
 use zbus_macros::{DBusError, interface, proxy};
 
+pub mod private_trait_public_proxy {
+    #[zbus::interface(
+        name = "org.example.PrivateTraitPublicProxy",
+        proxy(visibility = "pub")
+    )]
+    #[allow(dead_code)]
+    trait Contract {
+        fn ping(&self);
+    }
+}
+
+#[test]
+fn trait_interface_typed_helpers_do_not_exceed_contract_visibility() {
+    assert_ne!(
+        std::mem::size_of::<private_trait_public_proxy::ContractProxy<'static>>(),
+        0
+    );
+}
+
+mod trait_interface {
+    use zbus::interface;
+
+    #[interface(
+        name = "org.freedesktop.zbus_macros.TraitInterface",
+        server_name = "ServiceAdapter",
+        property_snapshot_name = "Snapshot",
+        managed_property_snapshot_name = "ManagedSnapshot",
+        object_manager_name = "ManagedObject",
+        property_snapshot(derive(Clone, PartialEq, Eq)),
+        proxy(
+            async_name = "Client",
+            blocking_name = "BlockingClient",
+            visibility = "pub(crate)"
+        )
+    )]
+    pub trait Contract {
+        fn echo(&self, value: String) -> String;
+
+        #[zbus(property)]
+        fn set_count(&mut self, value: u32);
+
+        #[zbus(property)]
+        fn count(&self) -> u32;
+
+        #[zbus(property)]
+        fn label(&self) -> zbus::fdo::Result<String>;
+
+        #[zbus(property, object_manager(skip))]
+        fn expensive(&self) -> String;
+
+        #[zbus(property(emits_changed_signal = "const"))]
+        fn version(&self) -> u32;
+
+        #[zbus(property(emits_changed_signal = "false"))]
+        fn quiet(&self) -> bool;
+
+        #[cfg_attr(any(), inline)]
+        #[zbus(property)]
+        fn phantom(&self) -> u32;
+
+        #[zbus(property)]
+        fn set_title(&mut self, value: &str);
+
+        #[zbus(property)]
+        fn title(&self) -> String;
+
+        #[cfg(any())]
+        #[zbus(signal)]
+        async fn disabled_signal(emitter: &zbus::object_server::SignalEmitter<'_>);
+
+        #[cfg(any())]
+        #[zbus(property)]
+        fn set_disabled(&mut self, value: u32);
+
+        #[cfg(any())]
+        #[zbus(property)]
+        fn disabled(&self) -> u32;
+    }
+
+    pub struct Behavior(pub u32);
+
+    impl Contract for Behavior {
+        fn echo(&self, value: String) -> String {
+            value
+        }
+
+        fn count(&self) -> u32 {
+            self.0
+        }
+
+        fn set_count(&mut self, value: u32) {
+            self.0 = value;
+        }
+
+        fn label(&self) -> zbus::fdo::Result<String> {
+            Ok("test".into())
+        }
+
+        fn expensive(&self) -> String {
+            "ignored".into()
+        }
+
+        fn version(&self) -> u32 {
+            1
+        }
+
+        fn quiet(&self) -> bool {
+            true
+        }
+
+        fn phantom(&self) -> u32 {
+            13
+        }
+
+        fn set_title(&mut self, _value: &str) {}
+
+        fn title(&self) -> String {
+            "title".into()
+        }
+    }
+}
+
+#[test]
+fn trait_interface_generates_server_proxy_and_typed_properties() {
+    use std::collections::HashMap;
+    use trait_interface::{ManagedObject, ManagedSnapshot, ServiceAdapter, Snapshot};
+    use zbus::{object_server::Interface as _, zvariant};
+
+    let adapter = ServiceAdapter(trait_interface::Behavior(7));
+    assert_eq!(adapter.0.0, 7);
+    assert_eq!(
+        ServiceAdapter::<trait_interface::Behavior>::name(),
+        "org.freedesktop.zbus_macros.TraitInterface"
+    );
+    assert_eq!(
+        Snapshot::INTERFACE_NAME,
+        "org.freedesktop.zbus_macros.TraitInterface"
+    );
+    assert_eq!(
+        Snapshot::PROPERTY_NAMES,
+        &[
+            "Count",
+            "Expensive",
+            "Label",
+            "Phantom",
+            "Quiet",
+            "Title",
+            "Version"
+        ]
+    );
+    assert_eq!(
+        Snapshot::MUTABLE_PROPERTY_NAMES,
+        &["Count", "Expensive", "Label", "Phantom", "Quiet", "Title"]
+    );
+
+    let context = zvariant::serialized::Context::new_dbus(zvariant::LE, 0);
+    let wire = HashMap::from([
+        ("Count", zvariant::Value::new(42u32)),
+        (
+            "Expensive",
+            zvariant::Value::new("decoded in full snapshot"),
+        ),
+        ("Label", zvariant::Value::new("hello")),
+        ("Phantom", zvariant::Value::new(13u32)),
+        ("Quiet", zvariant::Value::new(true)),
+        ("Title", zvariant::Value::new("title")),
+        ("Version", zvariant::Value::new(1u32)),
+        ("Unknown", zvariant::Value::new(true)),
+    ]);
+    let encoded = zvariant::to_bytes(context, &wire).unwrap();
+    let snapshot: Snapshot = encoded.deserialize().unwrap().0;
+    assert_eq!(snapshot.count, 42);
+    assert_eq!(snapshot.expensive, "decoded in full snapshot");
+    assert_eq!(snapshot.label.as_deref(), Some("hello"));
+    assert_eq!(snapshot.phantom, 13);
+    assert!(snapshot.quiet);
+    assert_eq!(snapshot.title, "title");
+    assert_eq!(snapshot.version, 1);
+    assert_eq!(snapshot.clone(), snapshot);
+
+    let encoded_snapshot = zvariant::to_bytes(context, &snapshot).unwrap();
+    let round_trip: Snapshot = encoded_snapshot.deserialize().unwrap().0;
+    assert_eq!(round_trip, snapshot);
+
+    let encoded = zvariant::to_bytes(context, &wire).unwrap();
+    let managed: ManagedSnapshot = encoded.deserialize().unwrap().0;
+    assert_eq!(managed.count, 42);
+    assert_eq!(managed.version, 1);
+
+    let interfaces = HashMap::from([
+        ("org.freedesktop.zbus_macros.TraitInterface", wire),
+        ("org.example.Unknown", HashMap::new()),
+    ]);
+    let encoded = zvariant::to_bytes(context, &interfaces).unwrap();
+    let object: ManagedObject = encoded.deserialize().unwrap().0;
+    assert_eq!(object.contract.unwrap().count, 42);
+
+    let missing_required = HashMap::from([("Label", zvariant::Value::new("hello"))]);
+    let encoded = zvariant::to_bytes(context, &missing_required).unwrap();
+    assert!(encoded.deserialize::<Snapshot>().is_err());
+}
+
 mod param {
     #[zbus_macros::proxy(
         interface = "org.freedesktop.zbus_macros.ProxyParam",
