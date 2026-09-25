@@ -981,7 +981,12 @@ pub fn expand_trait(
             pub const MUTABLE_PROPERTY_NAMES: &'static [&'static str] = &[#(#mutable_property_names,)*];
         }
 
-        #[derive(Debug, #zbus::zvariant::DeserializeDict, #zbus::zvariant::Type)]
+        #[derive(
+            Debug,
+            #zbus::zvariant::DeserializeDict,
+            #zbus::zvariant::Type,
+            #(#property_snapshot_derives),*
+        )]
         #[zvariant(signature = "a{sv}", crate = #zvariant_crate)]
         #vis struct #managed_properties_ident {
             #(#managed_snapshot_fields,)*
